@@ -289,9 +289,11 @@ mod tests {
         let mut rule = FillerWordsRule::default();
         let ctx = SessionContext::default();
         let events = rule.on_sentence(&sent(1, "然后我想说然后就是", 60_000), &ctx);
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].payload["word"], "然后");
-        assert_eq!(events[1].payload["word"], "就是");
+        assert_eq!(events[1].payload["word"], "然后");
+        assert_eq!(events[1].payload["countInSentence"], 2);
+        assert_eq!(events[2].payload["word"], "就是");
     }
 
     #[test]
