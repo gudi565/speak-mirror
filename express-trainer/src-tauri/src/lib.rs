@@ -6,11 +6,13 @@ use rules::engine::{RuleEngine, SessionSnapshot};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct AppState {
     engine: Arc<Mutex<RuleEngine>>,
-    stop: Mutex<Option<Sender<()>>>,
+    stop: Arc<Mutex<Option<Sender<()>>>>,
+    handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[tauri::command]
@@ -19,8 +21,6 @@ fn start_session(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     if stop_guard.is_some() {
         return Err("会话已在进行中".into());
     }
-    // 重置引擎
-    *state.engine.lock().unwrap() = RuleEngine::new();
 
     let models_dir: PathBuf = app
         .path()
@@ -39,15 +39,23 @@ fn start_session(app: AppHandle, state: State<AppState>) -> Result<(), String> {
         return Err("模型文件缺失，请先运行 scripts/download-models.ps1".into());
     }
 
+    // 重置引擎：仅在所有校验通过之后、派生线程之前执行
+    *state.engine.lock().unwrap() = RuleEngine::new();
+
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     *stop_guard = Some(tx);
     let engine = Arc::clone(&state.engine);
+    let stop_arc = Arc::clone(&state.stop);
     let app_clone = app.clone();
-    std::thread::spawn(move || {
-        if let Err(e) = session::run_session(app_clone.clone(), rx, engine, models_dir) {
+    let handle = std::thread::spawn(move || {
+        let result = session::run_session(app_clone.clone(), rx, engine, models_dir);
+        // 线程退出前（无论是正常结束还是出错）必须释放 stop 标志，否则无法重新启动会话
+        *stop_arc.lock().unwrap() = None;
+        if let Err(e) = result {
             let _ = app_clone.emit("session_error", e);
         }
     });
+    *state.handle.lock().unwrap() = Some(handle);
     Ok(())
 }
 
@@ -55,6 +63,9 @@ fn start_session(app: AppHandle, state: State<AppState>) -> Result<(), String> {
 fn stop_session(state: State<AppState>) -> SessionSnapshot {
     if let Some(tx) = state.stop.lock().unwrap().take() {
         let _ = tx.send(());
+        if let Some(handle) = state.handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
     }
     state.engine.lock().unwrap().snapshot()
 }
@@ -69,7 +80,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             engine: Arc::new(Mutex::new(RuleEngine::new())),
-            stop: Mutex::new(None),
+            stop: Arc::new(Mutex::new(None)),
+            handle: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![start_session, stop_session, get_snapshot])
         .run(tauri::generate_context!())

@@ -9,6 +9,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
 
+const SAMPLE_RATE: usize = 16_000;
+const MAX_SEGMENT_SECONDS: usize = 30;
+const MAX_SEGMENT_SAMPLES: usize = SAMPLE_RATE * MAX_SEGMENT_SECONDS;
+const PARTIAL_TRANSCRIPT_INTERVAL_MS: u64 = 600;
+const MIN_TRAILING_SEGMENT_SECONDS: f32 = 0.3;
+
+/// Keep the live buffer from growing without bound during long silences.
+pub fn trim_segment_to_cap(segment: &mut Vec<f32>, cap_samples: usize) {
+    if segment.len() > cap_samples {
+        let drain = segment.len() - cap_samples;
+        segment.drain(0..drain);
+    }
+}
+
 pub fn run_session(
     app: tauri::AppHandle,
     stop_rx: Receiver<()>,
@@ -59,6 +73,36 @@ pub fn run_session(
 
     engine.lock().unwrap().start(0);
 
+    let app_for_finalize = app.clone();
+    let mut finalize_segment = |samples: &[f32], recognizer: &mut TransducerRecognizer| {
+        if samples.is_empty() {
+            return;
+        }
+        let text = recognizer.transcribe(16_000, samples);
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        sentence_id += 1;
+        let end_ms = started.elapsed().as_millis() as u64;
+        let sentence = Sentence {
+            id: sentence_id,
+            text,
+            start_ms: end_ms.saturating_sub(samples.len() as u64 / 16),
+            end_ms,
+        };
+        let (events, snapshot) = {
+            let mut eng = engine.lock().unwrap();
+            let events = eng.ingest(sentence.clone());
+            (events, eng.snapshot())
+        };
+        let _ = app_for_finalize.emit("sentence_final", &sentence);
+        let _ = app_for_finalize.emit(
+            "analysis_update",
+            serde_json::json!({ "events": events, "snapshot": snapshot }),
+        );
+    };
+
     loop {
         if stop_rx.try_recv().is_ok() {
             break;
@@ -67,10 +111,11 @@ pub fn run_session(
             Ok(chunk) => {
                 let samples = resample_to_16k_mono(&chunk, capture.sample_rate, capture.channels);
                 current_segment.extend_from_slice(&samples);
+                trim_segment_to_cap(&mut current_segment, MAX_SEGMENT_SAMPLES);
                 vad.accept_waveform(samples);
 
                 // partial：说话中每 600ms 对当前段跑一次识别
-                if vad.is_speech() && last_partial.elapsed() > Duration::from_millis(600) {
+                if vad.is_speech() && last_partial.elapsed() > Duration::from_millis(PARTIAL_TRANSCRIPT_INTERVAL_MS) {
                     last_partial = Instant::now();
                     let text = recognizer.transcribe(16_000, &current_segment);
                     if !text.trim().is_empty() {
@@ -82,36 +127,49 @@ pub fn run_session(
                 while !vad.is_empty() {
                     let seg = vad.front();
                     vad.pop();
-                    let text = recognizer.transcribe(16_000, &seg.samples);
-                    let text = text.trim().to_string();
+                    finalize_segment(&seg.samples, &mut recognizer);
                     current_segment.clear();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    sentence_id += 1;
-                    let end_ms = started.elapsed().as_millis() as u64;
-                    let sentence = Sentence {
-                        id: sentence_id,
-                        text,
-                        start_ms: end_ms.saturating_sub(seg.samples.len() as u64 / 16),
-                        end_ms,
-                    };
-                    let (events, snapshot) = {
-                        let mut eng = engine.lock().unwrap();
-                        let events = eng.ingest(sentence.clone());
-                        (events, eng.snapshot())
-                    };
-                    let _ = app.emit("sentence_final", &sentence);
-                    let _ = app.emit(
-                        "analysis_update",
-                        serde_json::json!({ "events": events, "snapshot": snapshot }),
-                    );
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+
+    // Final flush: emit any VAD-buffered segment and any trailing live audio
+    // so the sentence being spoken is not dropped when the user hits stop.
+    vad.flush();
+    while !vad.is_empty() {
+        let seg = vad.front();
+        vad.pop();
+        finalize_segment(&seg.samples, &mut recognizer);
+    }
+    if current_segment.len() as f32 > SAMPLE_RATE as f32 * MIN_TRAILING_SEGMENT_SECONDS {
+        finalize_segment(&current_segment, &mut recognizer);
+    }
+
     drop(capture.stream);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_segment_keeps_newest_samples_up_to_cap() {
+        let mut buf: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        trim_segment_to_cap(&mut buf, 40);
+        assert_eq!(buf.len(), 40);
+        assert_eq!(buf[0], 60.0);
+        assert_eq!(buf[39], 99.0);
+    }
+
+    #[test]
+    fn trim_segment_is_no_op_when_under_cap() {
+        let mut buf: Vec<f32> = (0..30).map(|i| i as f32).collect();
+        trim_segment_to_cap(&mut buf, 40);
+        assert_eq!(buf.len(), 30);
+        assert_eq!(buf[0], 0.0);
+    }
 }
