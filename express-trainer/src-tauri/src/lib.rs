@@ -1,4 +1,6 @@
 pub mod rules;
+pub mod audio;
+pub mod session;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
