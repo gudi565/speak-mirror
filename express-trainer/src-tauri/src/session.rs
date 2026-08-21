@@ -23,6 +23,12 @@ pub fn trim_segment_to_cap(segment: &mut Vec<f32>, cap_samples: usize) {
     }
 }
 
+/// Whether the trailing live buffer is worth one last transcription after the
+/// VAD drain: only non-trivial audio the VAD never claimed (e.g. sub-min-duration speech).
+pub fn should_finalize_tail(remaining_samples: usize, sample_rate: usize, min_seconds: f32) -> bool {
+    remaining_samples as f32 > sample_rate as f32 * min_seconds
+}
+
 pub fn run_session(
     app: tauri::AppHandle,
     stop_rx: Receiver<()>,
@@ -143,8 +149,11 @@ pub fn run_session(
         let seg = vad.front();
         vad.pop();
         finalize_segment(&seg.samples, &mut recognizer);
+        // The flushed VAD segment contains the same samples as current_segment;
+        // clear it so the trailing finalize below cannot emit the sentence twice.
+        current_segment.clear();
     }
-    if current_segment.len() as f32 > SAMPLE_RATE as f32 * MIN_TRAILING_SEGMENT_SECONDS {
+    if should_finalize_tail(current_segment.len(), SAMPLE_RATE, MIN_TRAILING_SEGMENT_SECONDS) {
         finalize_segment(&current_segment, &mut recognizer);
     }
 
@@ -171,5 +180,18 @@ mod tests {
         trim_segment_to_cap(&mut buf, 40);
         assert_eq!(buf.len(), 30);
         assert_eq!(buf[0], 0.0);
+    }
+
+    #[test]
+    fn should_finalize_tail_rejects_empty_and_trivial_buffers() {
+        assert!(!should_finalize_tail(0, 16_000, 0.3));
+        // 0.2s of audio is below the 0.3s threshold
+        assert!(!should_finalize_tail((16_000.0 * 0.2) as usize, 16_000, 0.3));
+    }
+
+    #[test]
+    fn should_finalize_tail_accepts_unclaimed_speech_tail() {
+        // 0.5s of audio the VAD never claimed is worth one last transcription
+        assert!(should_finalize_tail((16_000.0 * 0.5) as usize, 16_000, 0.3));
     }
 }

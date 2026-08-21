@@ -63,7 +63,10 @@ fn start_session(app: AppHandle, state: State<AppState>) -> Result<(), String> {
 fn stop_session(state: State<AppState>) -> SessionSnapshot {
     if let Some(tx) = state.stop.lock().unwrap().take() {
         let _ = tx.send(());
-        if let Some(handle) = state.handle.lock().unwrap().take() {
+        // Take the handle out and drop the guard before joining so the join
+        // does not hold the handle mutex for the worker's lifetime.
+        let handle = state.handle.lock().unwrap().take();
+        if let Some(handle) = handle {
             let _ = handle.join();
         }
     }
