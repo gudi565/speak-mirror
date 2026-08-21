@@ -46,7 +46,7 @@ pub struct SessionContext {
     pub started_at_ms: u64,
 }
 
-pub trait Rule {
+pub trait Rule: Send {
     fn on_sentence(&mut self, sentence: &Sentence, ctx: &SessionContext) -> Vec<FeedbackEvent>;
     fn name(&self) -> &'static str;
 }
