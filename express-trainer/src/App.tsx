@@ -1,50 +1,47 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useSession } from "./hooks/useSession";
+import { SubtitleColumn } from "./components/SubtitleColumn";
+import { FeedbackColumn } from "./components/FeedbackColumn";
+import { StatsPanel } from "./components/StatsPanel";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+export default function App() {
+  const { running, partial, sentences, events, snapshot, error, fillerWords, start, stop } =
+    useSession();
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="flex h-screen flex-col bg-neutral-50 text-neutral-900">
+      <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-6 py-3">
+        <h1 className="text-base font-semibold">表达训练系统</h1>
+        <button
+          onClick={running ? stop : start}
+          className={`rounded-lg px-5 py-2 text-sm font-medium text-white ${
+            running ? "bg-red-500 hover:bg-red-600" : "bg-neutral-900 hover:bg-neutral-700"
+          }`}
+        >
+          {running ? "结束练习" : "开始练习"}
+        </button>
+      </header>
+      {error && (
+        <div className="border-b border-red-200 bg-red-50 px-6 py-2 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+      <main className="grid min-h-0 flex-1 grid-cols-[260px_1fr_300px]">
+        <aside className="border-r border-neutral-200 bg-white">
+          <div className="border-b border-neutral-100 px-4 py-2 text-xs font-medium text-neutral-400">
+            表达分析
+          </div>
+          <StatsPanel snapshot={snapshot} />
+        </aside>
+        <section className="min-w-0">
+          <SubtitleColumn sentences={sentences} partial={partial} fillers={fillerWords} />
+        </section>
+        <aside className="border-l border-neutral-200 bg-neutral-50">
+          <div className="border-b border-neutral-200 px-4 py-2 text-xs font-medium text-neutral-400">
+            实时反馈
+          </div>
+          <FeedbackColumn events={events} />
+        </aside>
+      </main>
+    </div>
   );
 }
-
-export default App;
