@@ -4,7 +4,7 @@ import { FeedbackColumn } from "./components/FeedbackColumn";
 import { StatsPanel } from "./components/StatsPanel";
 
 export default function App() {
-  const { running, partial, sentences, events, snapshot, error, fillerWords, start, stop } =
+  const { running, partial, sentences, events, snapshot, error, pending, fillerWords, start, stop } =
     useSession();
 
   return (
@@ -12,8 +12,9 @@ export default function App() {
       <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-6 py-3">
         <h1 className="text-base font-semibold">表达训练系统</h1>
         <button
+          disabled={pending}
           onClick={running ? stop : start}
-          className={`rounded-lg px-5 py-2 text-sm font-medium text-white ${
+          className={`rounded-lg px-5 py-2 text-sm font-medium text-white disabled:opacity-50 ${
             running ? "bg-red-500 hover:bg-red-600" : "bg-neutral-900 hover:bg-neutral-700"
           }`}
         >

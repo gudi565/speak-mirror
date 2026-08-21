@@ -12,6 +12,7 @@ export function useSession() {
   const [events, setEvents] = useState<FeedbackEvent[]>([]);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
   const unlisteners = useRef<(() => void)[]>([]);
 
   useEffect(() => {
@@ -51,20 +52,32 @@ export function useSession() {
     setEvents([]);
     setSnapshot(null);
     setPartial("");
+    setPending(true);
     try {
       await invoke("start_session");
       setRunning(true);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setPending(false);
     }
   }, []);
 
   const stop = useCallback(async () => {
-    const snap = await invoke<SessionSnapshot>("stop_session");
-    setSnapshot(snap);
-    setRunning(false);
-    setPartial("");
+    setPending(true);
+    try {
+      const snap = await invoke<SessionSnapshot>("stop_session");
+      setSnapshot(snap);
+      setRunning(false);
+      setPartial("");
+    } catch (e) {
+      setError(String(e));
+      setRunning(false);
+      setPartial("");
+    } finally {
+      setPending(false);
+    }
   }, []);
 
-  return { running, partial, sentences, events, snapshot, error, fillerWords: DEFAULT_FILLERS, start, stop };
+  return { running, partial, sentences, events, snapshot, error, pending, fillerWords: DEFAULT_FILLERS, start, stop };
 }
