@@ -1,0 +1,11 @@
+# 个人文件与本地资料（不发布）
+软件/
+新录音*.m4a
+CLAUDE.md
+express-trainer/产品方案.md
+
+# 构建产物
+express-trainer/src-tauri/target/
+express-trainer/src-tauri/sherpa-onnx-archive/
+node_modules/
+dist/
