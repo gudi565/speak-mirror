@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "express-trainer",
-  "version": "0.1.0",
-  "identifier": "com.administrator.express-trainer",
+  "productName": "SpeakMirror",
+  "version": "0.2.3",
+  "identifier": "com.speakmirror.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "表达训练系统",
-        "width": 800,
-        "height": 600
+        "title": "SpeakMirror 表达镜",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 640
       }
     ],
     "security": {
@@ -23,7 +25,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": true,
+        "installMode": "currentUser"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
