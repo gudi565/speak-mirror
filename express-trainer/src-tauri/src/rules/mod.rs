@@ -1,9 +1,13 @@
 pub mod filler;
+pub mod golden_quote;
 pub mod lexicon;
 pub mod precision;
 pub mod repetition;
 pub mod structure;
 pub mod emotion;
+pub mod hedge;
+pub mod time_vague;
+pub mod imagery;
 pub mod engine;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +31,16 @@ pub enum FeedbackKind {
     ConclusionMissing,
     ExampleMissing,
     Emotion,
+    /// 立场模糊（单句堆叠 ≥2 个犹豫弱化词）
+    Hedge,
+    /// 时间模糊（最近/过几天/回头…）
+    TimeVague,
+    /// 画面感（比喻标记 / 抽象词具象化建议）
+    Imagery,
+    /// 金句候选（比喻 + 数字结论 / 对仗强调等组合信号，正向）
+    GoldenQuote,
+    /// AI 周期快评（TOPIC/CONTRA/WRAP）
+    AiCheckin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -38,11 +52,22 @@ pub struct FeedbackEvent {
     pub payload: serde_json::Value,
 }
 
+/// 情感类别累计：次数 + 强度之和（快照再算平均强度）
+#[derive(Debug, Default, Clone)]
+pub struct EmotionAccumulator {
+    pub count: u32,
+    pub intensity_sum: u32,
+}
+
 #[derive(Debug, Default)]
 pub struct SessionContext {
     pub sentences: Vec<Sentence>,
     pub filler_counts: HashMap<String, u32>,
-    pub emotion_counts: HashMap<String, u32>,
+    pub emotion_counts: HashMap<String, EmotionAccumulator>,
+    /// 立场模糊词（hedges）逐词计数：无论是否达到提醒阈值都计入统计
+    pub hedge_counts: HashMap<String, u32>,
+    /// 金句候选句数（GoldenQuote 事件计数，规则显示与否都累计）
+    pub golden_quote_count: u32,
     pub started_at_ms: u64,
 }
 
@@ -74,5 +99,16 @@ mod tests {
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["kind"], "fillerWord");
         assert_eq!(v["sentenceId"], 3);
+        let kinds = [
+            (FeedbackKind::Hedge, "hedge"),
+            (FeedbackKind::TimeVague, "timeVague"),
+            (FeedbackKind::Imagery, "imagery"),
+            (FeedbackKind::GoldenQuote, "goldenQuote"),
+            (FeedbackKind::AiCheckin, "aiCheckin"),
+        ];
+        for (k, want) in kinds {
+            let e = FeedbackEvent { kind: k, sentence_id: None, message: "x".into(), payload: serde_json::json!({}) };
+            assert_eq!(serde_json::to_value(&e).unwrap()["kind"], want);
+        }
     }
 }
