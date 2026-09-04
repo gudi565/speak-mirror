@@ -342,7 +342,7 @@ export function SettingsView({ settings, onUpdate, onSave, onClose }: Props) {
             </p>
           </div>
 
-          {/* 会话录音（回放） */}
+          {/* 会话录音（回放）+ 声调偏差检查 */}
           <div className="rounded-lg border border-neutral-200 p-3">
             <label className="flex items-center gap-2 text-sm font-medium text-neutral-700">
               <input
@@ -355,6 +355,21 @@ export function SettingsView({ settings, onUpdate, onSave, onClose }: Props) {
             <p className="mt-1 text-xs text-neutral-400">
               音频只保存在本机的应用数据目录，不上传、不联网；单次录音最长保留 30 分钟
             </p>
+            <div className="mt-3">
+              <label className="flex items-center gap-2 text-sm font-medium text-neutral-700">
+                <input
+                  type="checkbox"
+                  checked={settings.toneCheck}
+                  onChange={(e) => onUpdate({ toneCheck: e.target.checked })}
+                />
+                声调偏差检查（练习结束后对录音分析，仅本机）
+              </label>
+              <p className="mt-1 text-xs text-neutral-400">
+                练习结束后用基音轨迹与内置词典比对声调，疑似偏差会在总结页提示
+                「第几句哪个字应为几声」，可点对应句回放对照；启发式判断仅供参考，
+                需要开启上面的会话录音
+              </p>
+            </div>
           </div>
 
           {/* 识别热词 */}

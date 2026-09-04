@@ -108,7 +108,7 @@ export default function App() {
           topic: checkinTopic,
         }
       : undefined;
-  const { running, partial, sentences, events, snapshot, voice, error, pending, fillerWords, start, startFromFile, stop } =
+  const { running, partial, sentences, events, snapshot, voice, toneFlags, error, pending, fillerWords, start, startFromFile, stop } =
     useSession(checkinConfig);
 
   // 设置加载后，场景选择器落到默认场景
@@ -624,6 +624,7 @@ export default function App() {
             onRestart={handleStart}
             generating={report.status === "streaming"}
             audioPath={lastAudio}
+            toneFlags={toneFlags}
           />
         </main>
       )}

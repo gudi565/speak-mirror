@@ -176,6 +176,17 @@ describe("recognition settings (dual-engine finals + VAD sensitivity)", () => {
     // 显式关闭 round-trip 保留（关闭后仅显示每句定稿，观感更稳）
     expect(normalizeSettings({ showLivePreview: false }).showLivePreview).toBe(false);
   });
+
+  it("defaults toneCheck=true and keeps explicit off (与 Rust default_tone_check 一致)", () => {
+    // 声调偏差检查默认开（练习结束后的本机分析）
+    expect(DEFAULT_SETTINGS.toneCheck).toBe(true);
+    // 旧设置无该字段 → 默认开；非法类型回落开
+    expect(normalizeSettings({ aiBackend: "openai", apiKey: "k" }).toneCheck).toBe(true);
+    expect(normalizeSettings({ toneCheck: 0 } as never).toneCheck).toBe(true);
+    expect(normalizeSettings({ toneCheck: "on" } as never).toneCheck).toBe(true);
+    // 显式关闭 round-trip 保留
+    expect(normalizeSettings({ toneCheck: false }).toneCheck).toBe(false);
+  });
 });
 
 describe("file speed options", () => {

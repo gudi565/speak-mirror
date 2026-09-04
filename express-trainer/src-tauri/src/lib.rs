@@ -13,6 +13,7 @@ pub mod rules;
 pub mod secrets;
 pub mod session;
 pub mod settings;
+pub mod tone;
 pub mod voice;
 
 use rules::engine::{EngineConfig, RuleEngine, SessionSnapshot};
@@ -67,8 +68,9 @@ pub struct AppState {
     stop: Arc<Mutex<Option<StopSignal>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
     /// 会话代计数器（每次 launch_session 递增）：标记 stop 槽当前属主，
-    /// 供会话线程退出时判定「槽里还是不是自己的停止信号」
-    session_generation: AtomicU64,
+    /// 供会话线程退出时判定「槽里还是不是自己的停止信号」；
+    /// 声调分析线程也用它判定结果是否仍属当前会话（Arc 供后台线程持有）
+    session_generation: Arc<AtomicU64>,
     /// AI 周期快评的会话级状态（计划时长 + 同类冷却时间戳）
     pub checkin: Mutex<checkin::CheckinRuntime>,
     /// 声音层分析器：会话线程独占写入（搭便车），stop/报告时读取
@@ -79,15 +81,25 @@ pub struct AppState {
     pub session_meta: Mutex<SessionMeta>,
     /// 本次会话录音的落盘路径（会话线程结束时写入；关闭录音/截断/写失败为 None）
     pub last_audio: Arc<Mutex<Option<String>>>,
+    /// 声调偏差标记（v0）：会话停止后由后台分析线程写入，
+    /// get_snapshot/transcript（报告与历史落盘）时并入快照
+    pub tone_flags: Arc<Mutex<Vec<tone::ToneFlag>>>,
     /// 应用内模型下载进行中标志（首启引导；并发保护）
     pub downloading: AtomicBool,
 }
 
 impl AppState {
-    /// 取全部终稿句与统计快照（返回克隆，锁立即释放，供异步报告命令使用）
+    /// 取全部终稿句与统计快照（返回克隆，锁立即释放，供异步报告命令使用）。
+    /// toneFlags 并入当前已完成的声调分析结果（分析未完成时为空数组）
     pub fn transcript(&self) -> (Vec<Sentence>, SessionSnapshot) {
         let eng = self.engine.lock().unwrap();
-        (eng.sentences().to_vec(), eng.snapshot())
+        let mut snap = eng.snapshot();
+        snap.tone_flags = self
+            .tone_flags
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        (eng.sentences().to_vec(), snap)
     }
 }
 
@@ -196,6 +208,8 @@ fn launch_session(
     *state.current_history_id.lock().unwrap() = None;
     *state.session_meta.lock().unwrap() = meta;
     *state.last_audio.lock().unwrap() = None;
+    // 上一会话的声调分析结果清空（新会话从「分析中」重新开始）
+    *state.tone_flags.lock().unwrap_or_else(|p| p.into_inner()) = Vec::new();
 
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let generation = state.session_generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -289,7 +303,7 @@ fn start_session_from_file(
 }
 
 #[tauri::command]
-fn stop_session(state: State<AppState>) -> SessionSnapshot {
+fn stop_session(app: AppHandle, state: State<AppState>) -> SessionSnapshot {
     // 先取出 stop 发送端并立刻释放锁：若跨 join 持有 stop 锁，会话线程退出前
     // 清理标志时也要锁它，会互相等待（死锁）。会话已自然结束（文件播完）时
     // 标志已被会话线程清空，这里直接跳过，照常返回快照。
@@ -306,6 +320,10 @@ fn stop_session(state: State<AppState>) -> SessionSnapshot {
     // 会话线程已 join：并入声音层终值
     let mut snap = state.engine.lock().unwrap().snapshot();
     snap.voice = Some(state.voice.lock().unwrap().metrics());
+    // 声调偏差检查（v0）：停止后的后处理路径——不碰实时链路。
+    // 开关开 + 有录音 wav + 有终稿句时，后台线程离线分析并 emit tone_update；
+    // 此处并入的是「此刻已就绪」的结果（通常为空：分析在后台刚起步）
+    snap.tone_flags = spawn_tone_analysis(&app, &state);
     snap
 }
 
@@ -313,7 +331,84 @@ fn stop_session(state: State<AppState>) -> SessionSnapshot {
 fn get_snapshot(state: State<AppState>) -> SessionSnapshot {
     let mut snap = state.engine.lock().unwrap().snapshot();
     snap.voice = Some(state.voice.lock().unwrap().metrics());
+    snap.tone_flags = state
+        .tone_flags
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
     snap
+}
+
+// ---------------------------------------------------------------------------
+// 声调偏差检查（v0）：会话停止后的异步后处理，不碰实时链路
+// ---------------------------------------------------------------------------
+
+/// 停止后触发声调分析（若条件满足）：读录音 wav → 逐句（startMs/endMs 切片）
+/// 跑 tone::check_sentence → 结果写入 AppState.tone_flags 并 emit `tone_update`
+/// `{ flags }`（空数组 = 已分析无发现；不发射 = 未开启/无录音）。
+/// 返回值恒为空（分析在后台异步完成，stop_session 的快照不带新结果）；
+/// 世代校验：分析完成时新会话已启动则丢弃结果，不打扰新会话的界面。
+fn spawn_tone_analysis(app: &AppHandle, state: &AppState) -> Vec<tone::ToneFlag> {
+    let settings = settings::load(app).normalized();
+    let audio = state
+        .last_audio
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if !settings.tone_check || audio.is_none() {
+        return Vec::new();
+    }
+    let (sentences, _) = state.transcript();
+    if sentences.is_empty() {
+        // 有录音但没有任何终稿句：无可分析文本。仍发一次空结果事件，
+        // 前端「分析中…」空态才能落定（不会永远转下去）
+        *state.tone_flags.lock().unwrap_or_else(|p| p.into_inner()) = Vec::new();
+        let _ = app.emit("tone_update", json!({ "flags": [] }));
+        return Vec::new();
+    }
+    let generation = state.session_generation.load(Ordering::SeqCst);
+    let flags_store = Arc::clone(&state.tone_flags);
+    let generation_counter = Arc::clone(&state.session_generation);
+    let wav = audio.unwrap();
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("tone-analysis".into())
+        .spawn(move || {
+            // 解码 + 重采样到 16k 单声道（会话录音本就是 16k 单声道，直通）
+            let analysis = |sentences: Vec<Sentence>| -> Vec<tone::ToneFlag> {
+                let decoded = match decode::decode_audio_file(std::path::Path::new(&wav)) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("声调分析：读取录音失败（{e}），本次跳过");
+                        return Vec::new();
+                    }
+                };
+                let samples = audio::resample_to_16k_mono(
+                    &decoded.samples,
+                    decoded.sample_rate,
+                    decoded.channels,
+                );
+                tone::analyze_session(&sentences, &samples, 16_000)
+            };
+            // 分析线程 panic 不许带崩整个应用（与主流程隔离）
+            let flags = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                analysis(sentences)
+            }))
+            .unwrap_or_else(|_| {
+                eprintln!("声调分析线程异常退出，本次跳过");
+                Vec::new()
+            });
+            // 世代校验：分析期间新会话已启动 → 结果作废（不写不发）
+            if generation_counter.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            *flags_store.lock().unwrap_or_else(|p| p.into_inner()) = flags.clone();
+            let _ = app.emit("tone_update", json!({ "flags": flags }));
+        });
+    if let Err(e) = spawned {
+        eprintln!("声调分析线程启动失败（{e}），本次跳过");
+    }
+    Vec::new()
 }
 
 /// 字幕红色标注用的口头禅词表（词库分级 + 用户词库 + 自定义）。
@@ -408,12 +503,13 @@ pub fn run() {
             engine: Arc::new(Mutex::new(RuleEngine::new())),
             stop: Arc::new(Mutex::new(None)),
             handle: Mutex::new(None),
-            session_generation: AtomicU64::new(0),
+            session_generation: Arc::new(AtomicU64::new(0)),
             checkin: Mutex::new(checkin::CheckinRuntime::default()),
             voice: Arc::new(Mutex::new(voice::VoiceAnalyzer::new(16_000))),
             current_history_id: Mutex::new(None),
             session_meta: Mutex::new(SessionMeta::default()),
             last_audio: Arc::new(Mutex::new(None)),
+            tone_flags: Arc::new(Mutex::new(Vec::new())),
             downloading: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
@@ -482,17 +578,51 @@ mod tests {
             engine: Arc::new(Mutex::new(RuleEngine::new())),
             stop: Arc::new(Mutex::new(None)),
             handle: Mutex::new(None),
-            session_generation: AtomicU64::new(0),
+            session_generation: Arc::new(AtomicU64::new(0)),
             checkin: Mutex::new(checkin::CheckinRuntime::default()),
             voice: Arc::new(Mutex::new(voice::VoiceAnalyzer::new(16_000))),
             current_history_id: Mutex::new(None),
             session_meta: Mutex::new(SessionMeta::default()),
             last_audio: Arc::new(Mutex::new(None)),
+            tone_flags: Arc::new(Mutex::new(Vec::new())),
             downloading: AtomicBool::new(false),
         };
         let g1 = state.session_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let g2 = state.session_generation.fetch_add(1, Ordering::SeqCst) + 1;
         assert_ne!(g1, g2);
+    }
+
+    /// transcript 并入已完成的声调分析结果（报告与历史落盘走这条路；
+    /// 分析未完成时为空数组，不影响旧流程）
+    #[test]
+    fn transcript_merges_tone_flags_into_snapshot() {
+        let state = AppState {
+            engine: Arc::new(Mutex::new(RuleEngine::new())),
+            stop: Arc::new(Mutex::new(None)),
+            handle: Mutex::new(None),
+            session_generation: Arc::new(AtomicU64::new(0)),
+            checkin: Mutex::new(checkin::CheckinRuntime::default()),
+            voice: Arc::new(Mutex::new(voice::VoiceAnalyzer::new(16_000))),
+            current_history_id: Mutex::new(None),
+            session_meta: Mutex::new(SessionMeta::default()),
+            last_audio: Arc::new(Mutex::new(None)),
+            tone_flags: Arc::new(Mutex::new(vec![tone::ToneFlag {
+                sentence_id: 2,
+                char_index: 1,
+                char: "妈".into(),
+                expected_tone: 1,
+                detected_shape: 4,
+            }])),
+            downloading: AtomicBool::new(false),
+        };
+        let (sentences, snap) = state.transcript();
+        assert!(sentences.is_empty()); // 无句会话也能并快照
+        assert_eq!(snap.tone_flags.len(), 1);
+        assert_eq!(snap.tone_flags[0].sentence_id, 2);
+        // 序列化 camelCase（tone_update / 历史落盘同口径）
+        let v = serde_json::to_value(&snap).unwrap();
+        assert_eq!(v["toneFlags"][0]["sentenceId"], 2);
+        assert_eq!(v["toneFlags"][0]["detectedShape"], 4);
     }
 
     /// generate_report 入口捕获的落盘快照必须是值拷贝：捕获后 AppState
@@ -504,7 +634,7 @@ mod tests {
             engine: Arc::new(Mutex::new(RuleEngine::new())),
             stop: Arc::new(Mutex::new(None)),
             handle: Mutex::new(None),
-            session_generation: AtomicU64::new(0),
+            session_generation: Arc::new(AtomicU64::new(0)),
             checkin: Mutex::new(checkin::CheckinRuntime::default()),
             voice: Arc::new(Mutex::new(voice::VoiceAnalyzer::new(16_000))),
             current_history_id: Mutex::new(Some("2026-08-31-100000".into())),
@@ -513,6 +643,7 @@ mod tests {
                 file_name: Some("talk.wav".into()),
             }),
             last_audio: Arc::new(Mutex::new(Some("C:/rec.wav".into()))),
+            tone_flags: Arc::new(Mutex::new(Vec::new())),
             downloading: AtomicBool::new(false),
         };
         let info = crate::history::capture_session_persist_info(&state);

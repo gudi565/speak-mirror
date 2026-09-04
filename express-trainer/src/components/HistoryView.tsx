@@ -6,6 +6,7 @@ import { scenarioLabel } from "../lib/scenarios";
 import { playGlyph, playbackAvailable } from "../lib/playback";
 import { reportModeLabel } from "../lib/report";
 import { useSentencePlayer } from "../hooks/useSentencePlayer";
+import { ToneFlagsPanel } from "./ToneFlagsPanel";
 import type { SessionRecord, SessionSummary, Settings } from "../types";
 
 interface Props {
@@ -265,6 +266,26 @@ export function HistoryView({ settings, onBack }: Props) {
                   ))}
               </div>
             )}
+          </div>
+        )}
+
+        {/* 声调提示（该次会话的离线分析结果有标记时展示） */}
+        {detail.snapshot.toneFlags && detail.snapshot.toneFlags.length > 0 && (
+          <div className="mt-4">
+            <div className="mb-1 flex items-baseline justify-between">
+              <span className="text-sm font-medium text-neutral-700">声调提示</span>
+              <span className="text-xs text-neutral-400">词典对照的启发判断，仅供参考</span>
+            </div>
+            <ToneFlagsPanel
+              flags={detail.snapshot.toneFlags}
+              sentences={detail.transcript}
+              audioPath={detail.audioFile ?? null}
+              playingId={player.playingId}
+              onToggle={(path, id, startMs, endMs) => {
+                void player.toggle(path, id, startMs, endMs);
+              }}
+            />
+            {player.error && <p className="mt-1 text-xs text-red-600">{player.error}</p>}
           </div>
         )}
 

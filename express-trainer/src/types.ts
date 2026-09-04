@@ -47,6 +47,20 @@ export interface VoiceMetrics {
   longestPauseMs: number;
 }
 
+/** 一条声调偏差标记（Rust tone::ToneFlag；tone_update 事件与快照共用） */
+export interface ToneFlag {
+  /** 所属句子 id（与 Sentence.id 对齐，据此定位逐句回放） */
+  sentenceId: number;
+  /** 音节在句内汉字序列中的下标（0 起） */
+  charIndex: number;
+  /** 疑似读错的字 */
+  char: string;
+  /** 词典期望声调（主读音；1–4） */
+  expectedTone: number;
+  /** 检测到的形状（1 高平 / 2 升 / 3 降升 / 4 降 / 5 短轻） */
+  detectedShape: number;
+}
+
 export interface SessionSnapshot {
   sentenceCount: number;
   fillerCounts: [string, number][];
@@ -62,6 +76,8 @@ export interface SessionSnapshot {
   goldenQuoteCount: number;
   /** 声音层终值（stop_session 时并入；会话中走 voice_update 事件） */
   voice?: VoiceMetrics | null;
+  /** 声调偏差标记（v0：停止后异步分析并入；旧历史记录缺省 undefined） */
+  toneFlags?: ToneFlag[];
 }
 
 /** mockInterview 仅在模拟面试流程内部使用（报告 scenario 与历史落盘），
@@ -139,6 +155,9 @@ export interface Settings {
   /** 显示实时识别预览（默认开）：中栏在定稿句下方显示「识别中…」流式小字；
    *  关闭后仅显示每句定稿，观感更稳 */
   showLivePreview: boolean;
+  /** 声调偏差检查（默认开）：练习结束后对录音做纯本机的声调分析，
+   *  疑似偏差在总结页「声调提示」面板列出；不上传录音 */
+  toneCheck: boolean;
 }
 
 export interface FillerWords {

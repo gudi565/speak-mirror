@@ -3,8 +3,10 @@ import { hasRemoteBackend } from "../lib/settings";
 import { SCENARIOS, scenarioMeta } from "../lib/scenarios";
 import { REPORT_MODE_OPTIONS } from "../lib/report";
 import { playGlyph, playbackAvailable } from "../lib/playback";
+import { tonePanelState } from "../lib/tone";
 import { useSentencePlayer } from "../hooks/useSentencePlayer";
-import type { ReportMode, Scenario, Sentence, SessionSnapshot, Settings } from "../types";
+import { ToneFlagsPanel } from "./ToneFlagsPanel";
+import type { ReportMode, Scenario, Sentence, SessionSnapshot, Settings, ToneFlag } from "../types";
 
 interface Props {
   sentences: Sentence[];
@@ -23,6 +25,8 @@ interface Props {
   generating: boolean;
   /** 本次会话录音路径（无录音 = null；会话进行中不提供回放） */
   audioPath: string | null;
+  /** 声调偏差标记（null = 尚未收到 tone_update：分析中/未开启/无录音） */
+  toneFlags: ToneFlag[] | null;
 }
 
 function fmtDuration(ms: number): string {
@@ -46,6 +50,7 @@ export function SummaryView({
   onRestart,
   generating,
   audioPath,
+  toneFlags,
 }: Props) {
   const defaultTranscript = useMemo(
     () => sentences.map((s) => s.text).join("\n"),
@@ -59,6 +64,13 @@ export function SummaryView({
   }, [defaultTranscript]);
 
   const remoteReady = settings ? hasRemoteBackend(settings) : false;
+
+  // 声调提示面板状态：开关关闭隐藏；无录音 / 分析中 / 无发现 / 有标记四态
+  const toneState = tonePanelState({
+    toneCheck: settings?.toneCheck ?? true,
+    audioPath,
+    toneFlags,
+  });
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
@@ -113,6 +125,45 @@ export function SummaryView({
             ))}
           </div>
           {player.error && <p className="mt-1 text-xs text-red-600">{player.error}</p>}
+        </div>
+      )}
+
+      {/* 声调提示（练习结束后的本机分析；无录音/分析中/无发现三种空态） */}
+      {toneState !== "hidden" && (
+        <div className="mt-5">
+          <div className="mb-1 flex items-baseline justify-between">
+            <label className="text-sm font-medium text-neutral-700">声调提示</label>
+            <span className="text-xs text-neutral-400">词典对照的启发判断，仅供参考</span>
+          </div>
+          {toneState === "noAudio" && (
+            <p className="rounded-xl border border-dashed border-neutral-200 bg-white px-3 py-3 text-xs text-neutral-400">
+              本次练习没有会话录音，无法做声调分析。可在「设置」中开启「会话录音」后再试。
+            </p>
+          )}
+          {toneState === "analyzing" && (
+            <p className="rounded-xl border border-dashed border-neutral-200 bg-white px-3 py-3 text-xs text-neutral-400">
+              声调分析中…（正在本机分析录音，稍候片刻）
+            </p>
+          )}
+          {toneState === "clean" && (
+            <p className="rounded-xl border border-dashed border-neutral-200 bg-white px-3 py-3 text-xs text-neutral-400">
+              未发现明显的声调偏差。
+            </p>
+          )}
+          {toneState === "flags" && (
+            <>
+              <ToneFlagsPanel
+                flags={toneFlags ?? []}
+                sentences={sentences}
+                audioPath={audioPath}
+                playingId={player.playingId}
+                onToggle={(path, id, startMs, endMs) => {
+                  void player.toggle(path, id, startMs, endMs);
+                }}
+              />
+              {player.error && <p className="mt-1 text-xs text-red-600">{player.error}</p>}
+            </>
+          )}
         </div>
       )}
 

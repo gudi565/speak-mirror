@@ -43,6 +43,7 @@ export const DEFAULT_SETTINGS: Settings = {
   vadSensitivity: "standard",
   enhanceAudio: true,
   showLivePreview: true,
+  toneCheck: true,
 };
 
 /** 与 Rust 侧 normalized() 一致：非法取值回落默认 */
@@ -104,6 +105,8 @@ export function normalizeSettings(raw: unknown): Settings {
   if (typeof s.enhanceAudio !== "boolean") s.enhanceAudio = true;
   // 实时识别预览（默认 true，与 Rust default_show_live_preview 一致）
   if (typeof s.showLivePreview !== "boolean") s.showLivePreview = true;
+  // 声调偏差检查（默认 true，与 Rust default_tone_check 一致）
+  if (typeof s.toneCheck !== "boolean") s.toneCheck = true;
   return s;
 }
 

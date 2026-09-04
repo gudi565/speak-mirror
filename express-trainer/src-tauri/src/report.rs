@@ -180,6 +180,14 @@ pub fn build_stats(
     stats
 }
 
+/// AI 报告 stats 注入声调偏差计数（纯函数可测）：有标记时写入
+/// toneFlagCount（>0 才写入，字段缺失 = 未分析/无发现，prompt 允许）。
+pub fn apply_tone_stats(stats: &mut Value, tone_flags: &[crate::tone::ToneFlag]) {
+    if !tone_flags.is_empty() {
+        stats["toneFlagCount"] = json!(tone_flags.len() as u64);
+    }
+}
+
 /// 组 user 消息 JSON（snake_case 键名，与 prompt 文档模板一致；自由练习用 topic、面试用 question）。
 /// previous = 上一次会话摘要（无历史时省略）。
 pub fn build_user_payload(
@@ -616,6 +624,24 @@ pub fn build_local_report(
         md.push_str(&local_voice_section(&v));
     }
 
+    // 声调（词典 + 基音轨迹的离线启发检查；无标记时省略）
+    if !snapshot.tone_flags.is_empty() {
+        md.push_str("## 声调\n\n");
+        for f in snapshot.tone_flags.iter().take(8) {
+            md.push_str(&format!(
+                "- 第 {} 句「{}」应为{}声（听感偏{}）\n",
+                f.sentence_id,
+                f.char,
+                crate::tone::tone_number_cn(f.expected_tone),
+                crate::tone::shape_label_cn(f.detected_shape)
+            ));
+        }
+        if snapshot.tone_flags.len() > 8 {
+            md.push_str(&format!("\n（其余 {} 处略）\n", snapshot.tone_flags.len() - 8));
+        }
+        md.push_str("\n（基于基音轮廓与词典声调的离线启发判断，仅供参考；可在总结页点对应句回放对照。）\n\n");
+    }
+
     // 口头禅
     if !snapshot.filler_counts.is_empty() {
         let minutes = snapshot.duration_ms as f64 / 60_000.0;
@@ -904,6 +930,8 @@ async fn stream_remote_report(
     if let Some(v) = voice::build_voice_json(voice, sentences, snapshot.duration_ms) {
         stats["voice"] = v;
     }
+    // 声调偏差计数（tone.rs 离线分析结果；>0 才写入）
+    apply_tone_stats(&mut stats, &snapshot.tone_flags);
     // mockInterview 注入逐题 qa（含句子区间锚点）；其余场景沿用 topic/question 键
     let user_payload = if let Some(qa) = qa {
         build_mock_interview_payload(topic, qa, stats, previous)
@@ -1235,6 +1263,34 @@ mod tests {
     }
 
     #[test]
+    fn apply_tone_stats_writes_count_only_when_present() {
+        // 无标记：字段缺失（= 未分析/无发现，prompt 允许）
+        let mut stats = json!({ "total_chars": 10 });
+        apply_tone_stats(&mut stats, &[]);
+        assert!(stats.get("toneFlagCount").is_none());
+        // 有标记：写入计数
+        let flags = vec![
+            crate::tone::ToneFlag {
+                sentence_id: 1,
+                char_index: 0,
+                char: "妈".into(),
+                expected_tone: 1,
+                detected_shape: 4,
+            },
+            crate::tone::ToneFlag {
+                sentence_id: 2,
+                char_index: 1,
+                char: "骂".into(),
+                expected_tone: 4,
+                detected_shape: 2,
+            },
+        ];
+        apply_tone_stats(&mut stats, &flags);
+        assert_eq!(stats["toneFlagCount"], 2);
+        assert_eq!(stats["total_chars"], 10, "已有字段不受影响");
+    }
+
+    #[test]
     fn build_stats_omits_rates_when_duration_unknown() {
         let s = vec![sent(1, "修正稿没有时间戳", 0, 0)];
         let stats = build_stats(&s, 0, &[], 0);
@@ -1414,6 +1470,39 @@ mod tests {
         let md = build_local_report("workreport", Some("Q3 进展"), &[], &engine.snapshot(), &[], None, None, &[], None);
         assert!(md.contains("- 场景：工作汇报"));
         assert!(md.contains("- 主题：Q3 进展"));
+    }
+
+    #[test]
+    fn local_report_lists_tone_flags_when_present() {
+        let mut engine = RuleEngine::new();
+        engine.start(0);
+        engine.ingest(sent(1, "妈妈骂马", 0, 30_000));
+        let sentences = vec![sent(1, "妈妈骂马", 0, 30_000)];
+        let mut snapshot = engine.snapshot();
+        snapshot.tone_flags = vec![
+            crate::tone::ToneFlag {
+                sentence_id: 1,
+                char_index: 2,
+                char: "骂".into(),
+                expected_tone: 4,
+                detected_shape: 2,
+            },
+            crate::tone::ToneFlag {
+                sentence_id: 1,
+                char_index: 3,
+                char: "马".into(),
+                expected_tone: 3,
+                detected_shape: 1,
+            },
+        ];
+        let md = build_local_report("free", None, &sentences, &snapshot, &[], None, None, &[], None);
+        assert!(md.contains("## 声调"));
+        assert!(md.contains("第 1 句「骂」应为四声（听感偏升调）"));
+        assert!(md.contains("第 1 句「马」应为三声（听感偏高平）"));
+        // 无标记的普通报告不含声调小节
+        let plain =
+            build_local_report("free", None, &sentences, &engine.snapshot(), &[], None, None, &[], None);
+        assert!(!plain.contains("## 声调"));
     }
 
     #[test]

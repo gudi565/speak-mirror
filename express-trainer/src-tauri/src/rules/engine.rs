@@ -65,6 +65,11 @@ pub struct SessionSnapshot {
     /// 会话中的实时值走 voice_update 事件。None 时序列化省略（旧 JSON 反序列化时缺省）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub voice: Option<crate::voice::VoiceMetrics>,
+    /// 声调偏差标记（v0，tone.rs 离线分析）：引擎不产生，会话停止后由
+    /// 后台分析线程写入 AppState、stop/get_snapshot/transcript 时并入。
+    /// 旧历史 JSON 缺省为空；为空时仍序列化（数组长度可判断「已分析无发现」）。
+    #[serde(default)]
+    pub tone_flags: Vec<crate::tone::ToneFlag>,
 }
 
 /// 规则引擎构建配置（来自设置，会话开始时生效）
@@ -296,6 +301,7 @@ impl RuleEngine {
             avg_sentence_chars,
             golden_quote_count: self.ctx.golden_quote_count,
             voice: None,
+            tone_flags: Vec::new(),
         }
     }
 

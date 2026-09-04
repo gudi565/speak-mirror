@@ -910,8 +910,10 @@ mod tests {
 
     #[test]
     fn file_feeder_paces_at_2x_then_disconnects() {
-        // 6 块 × 100ms 内容 = 600ms 素材；2 倍速应在 ~300ms 墙钟内送完
-        let samples: Vec<f32> = (0..6 * 1_600).map(|i| i as f32).collect();
+        // 20 块 × 100ms 内容 = 2s 素材；2 倍速应在 ~1s 墙钟内送完。
+        // 窗口放宽（0.9–1.8s）：上界须明显低于 1 倍速的 2s，下界容忍首块立即
+        // 发送——并行测试/重负载下小素材的窄窗口会抖动误报
+        let samples: Vec<f32> = (0..20 * 1_600).map(|i| i as f32).collect();
         let (tx, rx) = std::sync::mpsc::channel();
         let started = Instant::now();
         spawn_file_feeder(samples.clone(), 16_000, 1, 2.0, tx);
@@ -927,12 +929,11 @@ mod tests {
                 Err(RecvTimeoutError::Timeout) => panic!("feeder stalled"),
             }
         }
-        assert_eq!(chunks, 6);
+        assert_eq!(chunks, 20);
         assert_eq!(got, samples);
         let elapsed = started.elapsed();
-        // 2 倍速下界 ~250ms（容忍首块立即发送）；上界仍需明显低于 1 倍速的 600ms
-        assert!(elapsed >= Duration::from_millis(250), "elapsed {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(550), "elapsed {elapsed:?}");
+        assert!(elapsed >= Duration::from_millis(900), "elapsed {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(1800), "elapsed {elapsed:?}");
     }
 
     #[test]
@@ -953,9 +954,11 @@ mod tests {
 
     #[test]
     fn file_feeder_max_speed_sends_all_chunks_without_pacing() {
-        // 30 块 × 100ms = 3 秒素材：极速档应远快于 1 倍速实时（3s）送达，
-        // 且块序列与 1.0 速完全一致（同块同序 → 终稿必然一致）
-        let samples: Vec<f32> = (0..30 * 1_600).map(|i| i as f32).collect();
+        // 60 块 × 100ms = 6 秒素材：极速档应远快于 1 倍速实时（6s）送达，
+        // 且块序列与 1.0 速完全一致（同块同序 → 终稿必然一致）。
+        // 上界 2s：无界通道发 60 块本是毫秒级，2s 足以证明"无节流"语义，
+        // 同时在并行测试/重负载下不再抖动误报
+        let samples: Vec<f32> = (0..60 * 1_600).map(|i| i as f32).collect();
         let (tx, rx) = std::sync::mpsc::channel();
         let started = Instant::now();
         spawn_file_feeder(samples.clone(), 16_000, 1, crate::FILE_SPEED_MAX, tx);
@@ -971,11 +974,10 @@ mod tests {
                 Err(RecvTimeoutError::Timeout) => panic!("feeder stalled"),
             }
         }
-        assert_eq!(chunks, 30);
+        assert_eq!(chunks, 60);
         assert_eq!(got, samples); // 与 1.0 速的块序列逐样本一致
         let elapsed = started.elapsed();
-        // 3 秒素材极速送完：上限 1s（远低于实时的 3s，容忍 CI 抖动）
-        assert!(elapsed < Duration::from_secs(1), "elapsed {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "elapsed {elapsed:?}");
     }
 
     #[test]

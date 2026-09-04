@@ -937,6 +937,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // --- 声调标记入档（v0）--------------------------------------------------
+
+    #[test]
+    fn tone_flags_roundtrip_into_record_snapshot() {
+        let dir = test_dir();
+        let mut record = sample_record("2026-09-04-100000", 300, 3.5);
+        record.snapshot.tone_flags = vec![crate::tone::ToneFlag {
+            sentence_id: 2,
+            char_index: 1,
+            char: "妈".into(),
+            expected_tone: 1,
+            detected_shape: 4,
+        }];
+        save_record(&dir, &record).unwrap();
+        let back = read_record(&dir, "2026-09-04-100000").unwrap();
+        assert_eq!(back.snapshot.tone_flags, record.snapshot.tone_flags);
+        assert_eq!(back.snapshot.tone_flags[0].sentence_id, 2);
+        // 无标记快照序列化为空数组（与会话快照同口径：可区分「已分析无发现」
+        // 与「未分析」，由前端按 undefined/[] 判空态）
+        let v = serde_json::to_value(&sample_record("2026-09-04-110000", 10, 1.0)).unwrap();
+        assert_eq!(
+            v["snapshot"]["toneFlags"].as_array().map(|a| a.len()),
+            Some(0)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- 孤儿音频清理（C2）--------------------------------------------------
 
     #[test]

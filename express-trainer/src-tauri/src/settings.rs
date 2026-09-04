@@ -114,6 +114,11 @@ pub struct Settings {
     /// 纯前端展示开关，Rust 会话管线不消费，仅随 store 持久化保持两侧结构一致
     #[serde(default = "default_show_live_preview")]
     pub show_live_preview: bool,
+    /// 声调偏差检查（默认开）：会话停止且录音存在时，后台线程对录音做
+    /// 纯本机的基音轨迹 + 词典声调比对（tone.rs），结果经 tone_update 事件
+    /// 推给前端「声调提示」面板。不联网、不上传录音
+    #[serde(default = "default_tone_check")]
+    pub tone_check: bool,
 }
 
 pub fn default_filler_high_threshold() -> f64 {
@@ -137,6 +142,10 @@ pub fn default_enhance_audio() -> bool {
 }
 
 pub fn default_show_live_preview() -> bool {
+    true
+}
+
+pub fn default_tone_check() -> bool {
     true
 }
 
@@ -258,6 +267,7 @@ impl Default for Settings {
             vad_sensitivity: "standard".into(),
             enhance_audio: default_enhance_audio(),
             show_live_preview: default_show_live_preview(),
+            tone_check: default_tone_check(),
         }
     }
 }
@@ -679,5 +689,19 @@ mod tests {
         let v = serde_json::to_value(Settings { show_live_preview: false, ..Default::default() }).unwrap();
         assert_eq!(v["showLivePreview"], false);
         assert!(!serde_json::from_value::<Settings>(v).unwrap().show_live_preview);
+    }
+
+    #[test]
+    fn tone_check_defaults_true_and_legacy_uses_default() {
+        // 声调偏差检查默认开；旧 settings.json 无该字段 → 默认值
+        let legacy = r#"{ "aiBackend": "openai", "apiKey": "k", "baseUrl": "", "modelName": "", "obsidianVaultPath": "", "scenario": "free" }"#;
+        let s: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(s.tone_check);
+        assert!(Settings::default().tone_check);
+        assert_eq!(default_tone_check(), true);
+        // 序列化 camelCase + round-trip 保留显式关闭
+        let v = serde_json::to_value(Settings { tone_check: false, ..Default::default() }).unwrap();
+        assert_eq!(v["toneCheck"], false);
+        assert!(!serde_json::from_value::<Settings>(v).unwrap().tone_check);
     }
 }

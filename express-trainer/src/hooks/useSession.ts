@@ -6,6 +6,7 @@ import type {
   FillerWords,
   Sentence,
   SessionSnapshot,
+  ToneFlag,
   VoiceMetrics,
 } from "../types";
 
@@ -31,6 +32,8 @@ export function useSession(checkin?: CheckinConfig) {
   const [events, setEvents] = useState<FeedbackEvent[]>([]);
   const [snapshot, setSnapshot] = useState<SessionSnapshot | null>(null);
   const [voice, setVoice] = useState<VoiceMetrics | null>(null);
+  // 声调偏差标记（v0）：null = 尚未收到后端 tone_update（分析中/未开启/无录音）
+  const [toneFlags, setToneFlags] = useState<ToneFlag[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [fillerWords, setFillerWords] = useState<string[]>(FALLBACK_FILLERS);
@@ -63,6 +66,8 @@ export function useSession(checkin?: CheckinConfig) {
       ),
       // 声音层实时指标（Rust 会话线程每 ~2s 推送一次）
       listen<VoiceMetrics>("voice_update", (e) => setVoice(e.payload)),
+      // 声调偏差标记（会话停止后的后台分析完成时推送一次；空数组 = 无发现）
+      listen<{ flags: ToneFlag[] }>("tone_update", (e) => setToneFlags(e.payload.flags)),
       // AI 快评连续失败自动停用：右栏插入一条本地提示事件（可在设置重新开启）
       listen<{ reason: string }>("checkin_disabled", () => {
         setEvents((prev) => [
@@ -143,6 +148,7 @@ export function useSession(checkin?: CheckinConfig) {
     setEvents([]);
     setSnapshot(null);
     setVoice(null);
+    setToneFlags(null);
     setPartial("");
     uidRef.current = 0;
     newSentenceIdsRef.current = [];
@@ -216,6 +222,7 @@ export function useSession(checkin?: CheckinConfig) {
     events,
     snapshot,
     voice,
+    toneFlags,
     error,
     pending,
     fillerWords,
