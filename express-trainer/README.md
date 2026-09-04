@@ -10,13 +10,14 @@ SpeakMirror 是一个跑在你自己电脑上的表达陪练：点「开始练�
 - **词库规则引擎**：内置 MIT 授权的自建词库（439 情绪词、126 组笼统→精准替换、45 个分级填充词），9 条实时规则每条可单独关闭，同类提醒带冷却窗口——宁可漏报，不可刷屏
 - **多后端 AI 报告**：练习结束生成结构化报告（评分定位 / 亮点 / 逐句改写 / 可替换词汇 / 行为模式 / 对比上次 / 下次重点），支持 DeepSeek / OpenAI / Groq / Ollama 及任意 OpenAI 兼容端点；不配 Key 也有本地降级报告（纯统计 + 规则汇总）；自由练习与面试回答（STAR）两套场景模板；0.2.3 起可选「快速报告」（四节 ≤400 字，约 1/3 生成时间，默认）或完整八节报告，生成过程骨架逐节点亮
 - **声音层分析**：不只看「说了什么」，还看「怎么说的」——语速、失控停顿、音量动态范围、能量稳定性，全部为会话内相对值，不受麦克风差异影响
+- **声调提示（v0.2.4 新增）**：练习结束后对本机录音做普通话声调偏差分析（纯本地 DSP，无需联网），逐句定位「应为几声」，每条提示可一键回放该句试听；多重置信门控，宁可漏报不误报
 - **成长档案**：每次练习自动落盘，历史页查看趋势（口头禅频率 / 语速 / 停顿）与目标达成情况，报告自动「对比上次」
 
 ## 安装（Windows）
 
 ### 方式一：安装包
 
-1. 从 [Releases](../../releases) 下载 `SpeakMirror_0.2.3_x64-setup.exe`
+1. 从 [Releases](../../releases) 下载 `SpeakMirror_0.2.4_x64-setup.exe`
 2. 双击安装（安装语言可选简体中文 / English，默认安装到当前用户目录，无需管理员权限）
 3. 启动后进入首启引导，按提示完成即可开始练习
 
@@ -31,7 +32,7 @@ npm install
 npm run tauri build
 ```
 
-构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.3_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
+构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.4_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
 
 开发调试：`npm run tauri dev`。测试：`cd src-tauri && cargo test`（Rust 规则引擎）与 `npm test`（前端）。
 
@@ -101,4 +102,4 @@ powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
 
 ---
 
-SpeakMirror v0.2.3 · 免责：本地处理语音，API Key 仅存本地。
+SpeakMirror v0.2.4 · 免责：本地处理语音，API Key 仅存本地。
