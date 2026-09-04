@@ -17,7 +17,7 @@ SpeakMirror 是一个跑在你自己电脑上的表达陪练：点「开始练�
 
 ### 方式一：安装包
 
-1. 从 [Releases](../../releases) 下载 `SpeakMirror_0.2.4_x64-setup.exe`
+1. 从 [Releases](../../releases) 下载 `SpeakMirror_0.2.5_x64-setup.exe`
 2. 双击安装（安装语言可选简体中文 / English，默认安装到当前用户目录，无需管理员权限）
 3. 启动后进入首启引导，按提示完成即可开始练习
 
@@ -32,7 +32,7 @@ npm install
 npm run tauri build
 ```
 
-构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.4_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
+构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.5_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
 
 开发调试：`npm run tauri dev`。测试：`cd src-tauri && cargo test`（Rust 规则引擎）与 `npm test`（前端）。
 
@@ -102,4 +102,4 @@ powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
 
 ---
 
-SpeakMirror v0.2.4 · 免责：本地处理语音，API Key 仅存本地。
+SpeakMirror v0.2.5 · 免责：本地处理语音，API Key 仅存本地。
