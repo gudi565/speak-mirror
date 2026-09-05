@@ -3,12 +3,32 @@ use super::{FeedbackEvent, FeedbackKind, Rule, Sentence, SessionContext};
 pub const CONCLUSION_STREAK: usize = 5;
 pub const OPINION_STREAK: usize = 4;
 
-pub const CONCLUSION_MARKERS: &[&str] = &["所以", "总之", "结论是", "我的观点是", "一句话总结"];
-pub const OPINION_MARKERS: &[&str] = &["我觉得", "我认为", "应该"];
-pub const EXAMPLE_MARKERS: &[&str] = &["比如", "举个例子", "就像"];
+/// 结论词表（中英并列，英文标记一律小写——匹配时文本小写化后重查，
+/// 容忍句首大写；子串容差意味着 "so" 命中 "sorted" 只会漏报一次提醒，
+/// 符合宁可漏报不刷屏的取向）
+pub const CONCLUSION_MARKERS: &[&str] = &[
+    "所以", "总之", "结论是", "我的观点是", "一句话总结",
+    "so", "therefore", "in conclusion", "the point is",
+];
+/// 观点词表（ExampleMissingRule 的连击计数用，中英并列，英文小写）
+pub const OPINION_MARKERS: &[&str] = &[
+    "我觉得", "我认为", "应该",
+    "i think", "i believe", "i feel like", "in my opinion", "we should",
+];
+/// 举例词表（中英并列，英文小写）
+pub const EXAMPLE_MARKERS: &[&str] = &[
+    "比如", "举个例子", "就像",
+    "for example", "for instance", "such as",
+];
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
-    markers.iter().any(|m| text.contains(m))
+    if markers.iter().any(|m| text.contains(m)) {
+        return true;
+    }
+    // 英文标记容忍句首大写（For instance / I think…）：小写化后重查。
+    // 中文标记小写化无变化，早退分支已覆盖正常命中。
+    let lower = text.to_lowercase();
+    markers.iter().any(|m| lower.contains(m))
 }
 
 pub struct ConclusionMissingRule {
@@ -135,5 +155,58 @@ mod tests {
         }
         assert!(rule.on_sentence(&sent(4, "举个例子来说明一下"), &ctx).is_empty());
         assert!(rule.on_sentence(&sent(5, "我觉得还要继续"), &ctx).is_empty());
+    }
+
+    // --- 英文句：语言无关启发式对英文同样成立（结论/举例词表中英并列） ------
+
+    #[test]
+    fn english_conclusion_marker_resets_streak() {
+        let mut rule = ConclusionMissingRule::default();
+        let ctx = SessionContext::default();
+        for i in 1..=4 {
+            assert!(rule.on_sentence(&sent(i, "We worked on the search ranking this quarter"), &ctx).is_empty());
+        }
+        // "in conclusion" 重置连击 → 不提醒
+        assert!(rule.on_sentence(&sent(5, "In conclusion, the ranking improved"), &ctx).is_empty());
+        assert!(rule.on_sentence(&sent(6, "The dashboard also changed a lot"), &ctx).is_empty());
+    }
+
+    #[test]
+    fn english_description_streak_nudges_conclusion() {
+        let mut rule = ConclusionMissingRule::default();
+        let ctx = SessionContext::default();
+        let mut fired = false;
+        for i in 1..=5 {
+            let events = rule.on_sentence(&sent(i, "The dashboard shows usage trends across regions"), &ctx);
+            if !events.is_empty() {
+                fired = true;
+                assert_eq!(events[0].kind, FeedbackKind::ConclusionMissing);
+            }
+        }
+        assert!(fired, "连续 5 句英文描述应提醒给结论");
+    }
+
+    #[test]
+    fn english_opinions_without_example_nudge() {
+        let mut rule = ExampleMissingRule::default();
+        let ctx = SessionContext::default();
+        for i in 1..=3 {
+            assert!(rule.on_sentence(&sent(i, "I think we should rewrite the module"), &ctx).is_empty());
+        }
+        let events = rule.on_sentence(&sent(4, "I believe the rewrite pays off quickly"), &ctx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, FeedbackKind::ExampleMissing);
+    }
+
+    #[test]
+    fn english_example_marker_resets_opinion_streak() {
+        let mut rule = ExampleMissingRule::default();
+        let ctx = SessionContext::default();
+        for i in 1..=3 {
+            rule.on_sentence(&sent(i, "I think this approach is better"), &ctx);
+        }
+        // "for instance" 重置 → 不提醒
+        assert!(rule.on_sentence(&sent(4, "For instance, the retry path shrinks"), &ctx).is_empty());
+        assert!(rule.on_sentence(&sent(5, "I think the win is clear"), &ctx).is_empty());
     }
 }

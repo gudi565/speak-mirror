@@ -1,3 +1,4 @@
+use super::lang::{detect_lang, SentenceLang};
 use super::lexicon::{lexicon, WordMatcher};
 use super::{FeedbackEvent, FeedbackKind, Rule, Sentence, SessionContext};
 use std::collections::{HashMap, HashSet};
@@ -5,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 /// 比喻 / 画面感标记词（产品方案 §5.3）
 pub const IMAGERY_MARKERS: &[&str] = &["就像", "好比", "相当于", "仿佛", "如同"];
 
-/// 画面感规则：
+/// 画面感规则（中文特有，英文句直接跳过）：
 /// 1) 句内出现比喻标记（就像/好比/相当于/仿佛/如同）→ 正向提示一次（每会话一次）；
 /// 2) 词库 imageryPairs 的抽象词（很累/很忙…）出现 → 给出具象化方向，
 ///    每个抽象词每会话提示一次（同类提示不重复刷屏）。
@@ -44,6 +45,9 @@ impl Default for ImageryRule {
 
 impl Rule for ImageryRule {
     fn on_sentence(&mut self, sentence: &Sentence, _ctx: &SessionContext) -> Vec<FeedbackEvent> {
+        if detect_lang(&sentence.text) != SentenceLang::Chinese {
+            return Vec::new(); // 英文/无字母句跳过：标记词与画面对子是中文特有数据
+        }
         let mut events = Vec::new();
         if !self.marker_hinted {
             if let Some(marker) = self.marker_matcher.find_distinct(&sentence.text).first() {
@@ -129,5 +133,14 @@ mod tests {
         let mut rule = ImageryRule::default();
         let ctx = SessionContext::default();
         assert!(rule.on_sentence(&sent(1, "会议纪要已同步到共享文档"), &ctx).is_empty());
+    }
+
+    #[test]
+    fn english_sentence_is_skipped() {
+        // 英文句不做画面感匹配（比喻标记「like a / as if」与画面对子是中文特有设计）
+        let mut rule = ImageryRule::default();
+        let ctx = SessionContext::default();
+        assert!(rule.on_sentence(&sent(1, "It is like a mirror for your speech"), &ctx).is_empty());
+        assert!(rule.on_sentence(&sent(2, "I was very busy and tired"), &ctx).is_empty());
     }
 }

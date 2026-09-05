@@ -1,3 +1,4 @@
+use super::lang::{detect_lang, SentenceLang};
 use super::lexicon::{lexicon, WordMatcher};
 use super::{FeedbackEvent, FeedbackKind, Rule, Sentence, SessionContext};
 use std::collections::HashMap;
@@ -5,6 +6,7 @@ use std::collections::HashMap;
 /// 情感词规则：词库 emotionWords（七大类 439 词，强度 1–9）。
 /// 最长优先匹配（「大吃一惊」不再重复计内部的「吃惊」）；
 /// 每个词每句计一次，事件 payload 带类别与强度，供快照聚合平均强度。
+/// 英文句直接跳过（情绪词表是中文特有数据，英文侧不强做）。
 pub struct EmotionRule {
     matcher: WordMatcher,
     /// 词 → (类别, 强度)。类别存 owned String：词库经 Arc 生效（可含用户合并副本）
@@ -42,6 +44,9 @@ impl Default for EmotionRule {
 
 impl Rule for EmotionRule {
     fn on_sentence(&mut self, sentence: &Sentence, _ctx: &SessionContext) -> Vec<FeedbackEvent> {
+        if detect_lang(&sentence.text) != SentenceLang::Chinese {
+            return Vec::new(); // 英文/无字母句跳过：情绪词表是中文特有数据
+        }
         self.matcher
             .find_distinct(&sentence.text)
             .into_iter()
@@ -108,5 +113,16 @@ mod tests {
     fn loads_full_lexicon_scale() {
         let rule = EmotionRule::default();
         assert_eq!(rule.info.len(), 439);
+    }
+
+    #[test]
+    fn english_sentence_is_skipped() {
+        // 英文句不做情绪词匹配（中文特有规则）
+        let mut rule = EmotionRule::default();
+        let ctx = SessionContext::default();
+        assert!(rule
+            .on_sentence(&sent(1, "I am so happy and excited today"), &ctx)
+            .is_empty());
+        assert!(rule.on_sentence(&sent(2, "123 456"), &ctx).is_empty());
     }
 }

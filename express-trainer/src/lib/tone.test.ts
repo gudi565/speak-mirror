@@ -70,6 +70,29 @@ describe("tonePanelState", () => {
     expect(tonePanelState({ toneCheck: false, audioPath: null, toneFlags: null })).toBe("hidden");
   });
 
+  it("hides for English sessions (cjk ratio below threshold)", () => {
+    // 英文练习：普通话声调分析不适用，面板整体隐藏（即使已分析出标记）
+    expect(
+      tonePanelState({ toneCheck: true, audioPath: "/a.wav", toneFlags: [flag()], cjkRatio: 0.05 }),
+    ).toBe("hidden");
+    expect(tonePanelState({ toneCheck: true, audioPath: null, toneFlags: null, cjkRatio: 0 })).toBe(
+      "hidden",
+    );
+    // 恰好 30% 视为中文（与 Rust 阈值同为「低于才隐藏」）
+    expect(
+      tonePanelState({ toneCheck: true, audioPath: "/a.wav", toneFlags: [], cjkRatio: 0.3 }),
+    ).toBe("clean");
+  });
+
+  it("keeps legacy behavior when cjkRatio is unknown (undefined / null)", () => {
+    expect(tonePanelState({ toneCheck: true, audioPath: "/a.wav", toneFlags: null })).toBe(
+      "analyzing",
+    );
+    expect(
+      tonePanelState({ toneCheck: true, audioPath: "/a.wav", toneFlags: [flag()], cjkRatio: null }),
+    ).toBe("flags");
+  });
+
   it("shows no-audio state when there is no recording (even before any event)", () => {
     expect(tonePanelState({ toneCheck: true, audioPath: null, toneFlags: null })).toBe("noAudio");
     expect(tonePanelState({ toneCheck: true, audioPath: null, toneFlags: [] })).toBe("noAudio");

@@ -7,6 +7,7 @@
 
 use crate::history::{self, PreviousSession};
 use crate::rules::engine::SessionSnapshot;
+use crate::rules::lang::{detect_transcript_lang, SentenceLang};
 use crate::rules::{FeedbackEvent, FeedbackKind, Sentence};
 use crate::settings::Settings;
 use crate::voice::{self, VoiceReport};
@@ -25,6 +26,11 @@ pub const MOCK_INTERVIEW_PROMPT: &str = include_str!("../prompts/mock_interview.
 /// 快速报告 prompt（四节 ≤400 字）：输入 user JSON 与完整版完全一致，
 /// 评分维度沿用当前场景，仅输出长度与节结构不同
 pub const QUICK_PROMPT: &str = include_str!("../prompts/quick.md");
+/// 英文练习报告（英文完整版/快速版）：逐字稿整体 CJK 占比 <30% 时启用。
+/// 英文侧暂只有自由练习维度；面试/口播/汇报场景复用 en-free（场景名经
+/// user JSON 的 scenario 字段注入一行说明），英文面试模板留后续。
+pub const EN_FREE_PROMPT: &str = include_str!("../prompts/en-free.md");
+pub const EN_QUICK_PROMPT: &str = include_str!("../prompts/en-quick.md");
 
 /// 报告支持的全部场景（与前端 types.ts Scenario 同步；settings.rs 的 SCENARIOS
 /// 仍为四项——mockInterview 只在模拟面试流程内部使用，不进普通场景下拉/设置）
@@ -61,10 +67,31 @@ pub fn system_prompt_for(scenario: &str) -> Result<&'static str, String> {
 /// 按输入 JSON 自行对齐当前场景的评分维度）；full 走场景 prompt。
 /// 场景合法性两种模式都校验（历史落盘口径一致）。
 pub fn system_prompt_for_mode(scenario: &str, mode: &str) -> Result<&'static str, String> {
-    system_prompt_for(scenario)?; // quick 模式也先校验场景（含错误信息统一）
+    system_prompt_for_mode_lang(scenario, mode, SentenceLang::Chinese)
+}
+
+/// 按模式 + 语言选 system prompt（纯函数可测）：
+/// - 英文逐字稿（整体 CJK 占比 <30%，见 lang::detect_transcript_lang）：
+///   quick → en-quick.md、full → en-free.md。面试/口播/汇报暂复用英文自由
+///   练习模板（场景名经 user JSON 的 scenario 字段注入），英文面试留后续。
+/// - 模拟面试恒中文 prompt（qa 逐题结构是中文模板；英文面试留后续）。
+/// - 中文：quick → quick.md、full → 场景 prompt（行为不变）。
+pub fn system_prompt_for_mode_lang(
+    scenario: &str,
+    mode: &str,
+    lang: SentenceLang,
+) -> Result<&'static str, String> {
+    system_prompt_for(scenario)?; // 两种模式都先校验场景（含错误信息统一）
+    let use_en = lang == SentenceLang::English && scenario != "mockInterview";
     match mode {
-        "quick" => Ok(QUICK_PROMPT),
-        "full" => system_prompt_for(scenario),
+        "quick" => Ok(if use_en { EN_QUICK_PROMPT } else { QUICK_PROMPT }),
+        "full" => {
+            if use_en {
+                Ok(EN_FREE_PROMPT)
+            } else {
+                system_prompt_for(scenario)
+            }
+        }
         other => Err(format!(
             "未知报告模式：{other}（支持 {}）",
             REPORT_MODES.join(" / ")
@@ -94,6 +121,17 @@ pub fn scenario_label(scenario: &str) -> &'static str {
         "workreport" => "工作汇报",
         "mockInterview" => "模拟面试",
         _ => "自由练习",
+    }
+}
+
+/// 场景英文名（英文报告的 user JSON scenario 字段注入用；
+/// en-free/en-quick 按此把面试/口播/汇报考量为一行上下文说明）
+pub fn en_scenario_label(scenario: &str) -> &'static str {
+    match scenario {
+        "interview" => "interview answer",
+        "vlog" => "video voiceover",
+        "workreport" => "work report",
+        _ => "free talk",
     }
 }
 
@@ -533,15 +571,18 @@ fn local_previous_section(previous: &PreviousSession, snapshot: &SessionSnapshot
     )
 }
 
-/// 结论句启发标记（本地降级报告的机械判断：出现即算"有结论意识"）
+/// 结论句启发标记（本地降级报告的机械判断：出现即算"有结论意识"；
+/// 中英并列，英文标记一律小写——匹配时文本小写化，容忍句首大写）
 const CONCLUSION_MARKERS: &[&str] = &[
     "总之", "综上", "因此", "所以", "结论是", "总结一下", "一句话总结", "我的结论", "我认为",
+    "in conclusion", "therefore", "the point is",
 ];
 
 pub fn has_conclusion_sentence(sentences: &[Sentence]) -> bool {
-    sentences
-        .iter()
-        .any(|s| CONCLUSION_MARKERS.iter().any(|m| s.text.contains(m)))
+    sentences.iter().any(|s| {
+        let lower = s.text.to_lowercase();
+        CONCLUSION_MARKERS.iter().any(|m| lower.contains(m))
+    })
 }
 
 /// 模拟面试本地降级报告的「逐题速览」：每题字数 / 口头禅 / 是否有结论句
@@ -918,7 +959,10 @@ async fn stream_remote_report(
     qa: Option<&[QaItem]>,
     mode: &str,
 ) -> Result<String, String> {
-    let system = system_prompt_for_mode(scenario, mode)?;
+    // 句子语言检测：逐字稿整体 CJK 占比 <30% → 英文 prompt
+    // （模拟面试恒中文；面试/口播/汇报英文练习复用 en-free，场景名注入）
+    let lang = detect_transcript_lang(sentences);
+    let system = system_prompt_for_mode_lang(scenario, mode, lang)?;
     // 快速模式收紧 max_tokens（四节 ≤400 字，出稿更快也更省）；
     // 完整版不设上限（行为与 0.2.2 之前一致）
     let max_tokens = if mode == "quick" { Some(QUICK_MAX_TOKENS) } else { None };
@@ -936,11 +980,17 @@ async fn stream_remote_report(
     }
     // 声调偏差计数（tone.rs 离线分析结果；>0 才写入）
     apply_tone_stats(&mut stats, &snapshot.tone_flags);
-    // mockInterview 注入逐题 qa（含句子区间锚点）；其余场景沿用 topic/question 键
+    // mockInterview 注入逐题 qa（含句子区间锚点）；其余场景沿用 topic/question 键。
+    // 英文报告：非自由练习场景（面试/口播/汇报）复用 en-free/en-quick，
+    // scenario 字段注入一行场景说明（en-free/en-quick 已声明该字段语义）
     let user_payload = if let Some(qa) = qa {
         build_mock_interview_payload(topic, qa, stats, previous)
     } else {
-        build_user_payload(scenario, topic, sentences, stats, previous)
+        let mut payload = build_user_payload(scenario, topic, sentences, stats, previous);
+        if lang == SentenceLang::English && scenario != "free" {
+            payload["scenario"] = json!(en_scenario_label(scenario));
+        }
+        payload
     };
     let body = build_request_body(&model, system, &user_payload.to_string(), max_tokens);
 
@@ -1207,6 +1257,149 @@ mod tests {
         assert_eq!(system_prompt_for_mode("vlog", "full").unwrap(), VLOG_PROMPT);
         // 未知模式报错
         assert!(system_prompt_for_mode("free", "turbo").is_err());
+    }
+
+    // --- 英文报告：prompt 选取与场景注入 ------------------------------------
+
+    #[test]
+    fn english_prompts_embedded_with_full_contract() {
+        // 身份与输入结构（与中文完整版对齐：topic/scenario/previous/transcript/stats/voice）
+        assert!(EN_FREE_PROMPT.contains("SpeakMirror"));
+        assert!(EN_FREE_PROMPT.contains("scenario"));
+        assert!(EN_FREE_PROMPT.contains("previous"));
+        assert!(EN_FREE_PROMPT.contains("start_ms"));
+        assert!(EN_FREE_PROMPT.contains("volume_dynamic_range_db"));
+        // ASR 错词纪律的英文版口径：按语义理解，不当作用户问题
+        assert!(EN_FREE_PROMPT.contains("never treat ASR mis-recognitions as the user's language problems"));
+        // 证据引用铁律与 SCORE 标记
+        assert!(EN_FREE_PROMPT.contains("「#id」"));
+        assert!(EN_FREE_PROMPT.contains("<!--SCORE:"));
+        assert!(EN_FREE_PROMPT.contains("nothing may follow it"));
+        // 八节标题齐全（节顺序由文件顺序保证）
+        for section in [
+            "## 1. Overall",
+            "## 2. Highlights",
+            "## 3. Sentence Rewrites",
+            "## 4. Vocabulary Upgrades",
+            "## 5. Behavior Patterns",
+            "## 6. Delivery",
+            "## 7. Data",
+            "## 8. Next Practice Focus",
+        ] {
+            assert!(EN_FREE_PROMPT.contains(section), "en-free 缺小节 {section}");
+        }
+        // 评分维度（英文键，SCORE 标记一致）
+        assert!(EN_FREE_PROMPT.contains("efficiency"));
+        assert!(EN_FREE_PROMPT.contains("vocabularyPrecision"));
+        assert!(EN_FREE_PROMPT.contains("fillerControl"));
+        // 四节快速版
+        for section in [
+            "## 1. Overall",
+            "## 2. Highlights",
+            "## 3. The One Fix",
+            "## 4. Next Focus",
+        ] {
+            assert!(EN_QUICK_PROMPT.contains(section), "en-quick 缺小节 {section}");
+        }
+        assert!(EN_QUICK_PROMPT.contains("at most 250 words"));
+        assert!(EN_QUICK_PROMPT.contains("<!--SCORE:"));
+    }
+
+    #[test]
+    fn system_prompt_for_mode_lang_routes_english() {
+        // 英文 + 自由/面试/口播/汇报 → 英文模板（场景复用 en-free/en-quick）
+        for scenario in ["free", "interview", "vlog", "workreport"] {
+            assert_eq!(
+                system_prompt_for_mode_lang(scenario, "full", SentenceLang::English).unwrap(),
+                EN_FREE_PROMPT
+            );
+            assert_eq!(
+                system_prompt_for_mode_lang(scenario, "quick", SentenceLang::English).unwrap(),
+                EN_QUICK_PROMPT
+            );
+        }
+        // 模拟面试恒中文（qa 逐题结构是中文模板；英文面试留后续）
+        assert_eq!(
+            system_prompt_for_mode_lang("mockInterview", "full", SentenceLang::English).unwrap(),
+            MOCK_INTERVIEW_PROMPT
+        );
+        assert_eq!(
+            system_prompt_for_mode_lang("mockInterview", "quick", SentenceLang::English).unwrap(),
+            QUICK_PROMPT
+        );
+        // 中文与 Neutral：行为与旧版一致
+        assert_eq!(
+            system_prompt_for_mode_lang("free", "full", SentenceLang::Chinese).unwrap(),
+            FREE_PROMPT
+        );
+        assert_eq!(
+            system_prompt_for_mode_lang("vlog", "quick", SentenceLang::Chinese).unwrap(),
+            QUICK_PROMPT
+        );
+        // 校验照旧：非法场景/模式报错
+        assert!(system_prompt_for_mode_lang("other", "full", SentenceLang::English).is_err());
+        assert!(system_prompt_for_mode_lang("free", "turbo", SentenceLang::English).is_err());
+    }
+
+    #[test]
+    fn english_transcript_detected_for_prompt_selection() {
+        let s = |id: u64, text: &str| sent(id, text, 0, 1000);
+        // 整体英文逐字稿 → 英文 prompt 路由
+        let english = vec![
+            s(1, "So today I want to talk about my weekly report"),
+            s(2, "Basically we shipped three features last week"),
+        ];
+        assert_eq!(detect_transcript_lang(&english), SentenceLang::English);
+        assert_eq!(
+            system_prompt_for_mode_lang("free", "full", detect_transcript_lang(&english)).unwrap(),
+            EN_FREE_PROMPT
+        );
+        // 整体中文逐字稿 → 中文场景 prompt
+        let chinese = vec![s(1, "这周我们上线了三个功能"), s(2, "所以整体进展顺利")];
+        assert_eq!(
+            system_prompt_for_mode_lang("free", "full", detect_transcript_lang(&chinese)).unwrap(),
+            FREE_PROMPT
+        );
+    }
+
+    #[test]
+    fn en_scenario_labels_cover_non_free_scenarios() {
+        assert_eq!(en_scenario_label("interview"), "interview answer");
+        assert_eq!(en_scenario_label("vlog"), "video voiceover");
+        assert_eq!(en_scenario_label("workreport"), "work report");
+        assert_eq!(en_scenario_label("free"), "free talk");
+    }
+
+    #[test]
+    fn local_report_english_session_renders_filler_and_precision_tables() {
+        // 本地降级报告对英文句的口头禅/精确度表正常（数据同源：引擎统计）
+        let mut engine = RuleEngine::new();
+        engine.start(0);
+        engine.ingest(sent(1, "Um, you know, we did a lot of work on this thing and it was very good", 0, 60_000));
+        engine.ingest(sent(2, "So the dashboard shows usage trends", 60_000, 120_000));
+        let snapshot = engine.snapshot();
+        let sentences: Vec<Sentence> = engine.sentences().to_vec();
+        let events = collect_rule_events(&sentences);
+        let md = build_local_report(
+            "free",
+            Some("weekly report"),
+            &sentences,
+            &snapshot,
+            &events,
+            None,
+            None,
+            &[],
+            None,
+        );
+        // 英文口头禅进表（词边界：likely 类不误报由引擎测试覆盖）
+        assert!(md.contains("## 口头禅"));
+        assert!(md.contains("| um | 1 |"));
+        assert!(md.contains("| you know | 1 |"));
+        // 英文精确度事件照常进规则事件汇总（首句触发，未被句级冷却拦下）
+        assert!(md.contains("词汇精确度"));
+        assert!(md.contains("'very' → "));
+        // 逐字稿原样
+        assert!(md.contains("1. Um, you know, we did a lot of work on this thing and it was very good"));
     }
 
     #[test]

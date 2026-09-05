@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 pub const LEXICON_JSON: &str = include_str!("../../lexicon/lexicon-v2.json");
+pub const LEXICON_EN_JSON: &str = include_str!("../../lexicon/lexicon-en.json");
 
 /// 元数据键：出现在 `timeVague` / `hedgeToDirectMap` 顶层的说明文字，不是词条
 pub const META_DESCRIPTION_KEY: &str = "description";
@@ -100,6 +101,33 @@ pub fn builtin_lexicon() -> &'static LexiconV2 {
     })
 }
 
+/// 英文词库（lexicon-en.json）：只含 fillers / hedges / vagueToPrecise 三类
+/// 可移植数据；情绪词/时间模糊/画面感等中文特有规则英文句子直接跳过。
+/// 全部自建（MIT），无用户合并层（英文侧用户自增长留后续）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LexiconEn {
+    #[serde(rename = "_meta")]
+    pub meta: serde_json::Value,
+    pub fillers: Fillers,
+    pub hedges: Vec<String>,
+    #[serde(rename = "vagueToPrecise")]
+    pub vague_to_precise: HashMap<String, Vec<String>>,
+}
+
+/// 解析并全局缓存英文内置词库（损坏即 panic，口径同中文词库）。
+pub fn builtin_lexicon_en() -> &'static LexiconEn {
+    static LEXICON: OnceLock<LexiconEn> = OnceLock::new();
+    LEXICON.get_or_init(|| {
+        serde_json::from_str(LEXICON_EN_JSON).unwrap_or_else(|e| {
+            panic!(
+                "词库 src-tauri/lexicon/lexicon-en.json 解析失败：{e}。\
+                 该文件是编译期内嵌的产品地基，请校验 JSON 后重新构建。"
+            )
+        })
+    })
+}
+
 /// 用户词库（appdata/user-lexicon.json）：vagueToPrecise 条目 + 可选自定义 filler 词。
 /// 由「设置 → 词库候选」写入（growth.rs 命令层负责 IO）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -170,15 +198,37 @@ pub fn lexicon() -> Arc<LexiconV2> {
 // 最长优先匹配器
 // ---------------------------------------------------------------------------
 
+/// 判断一个字符是否算「词内字符」（等效正则 \w 的 ASCII 部分）：
+/// 英文字母 / 数字 / 下划线。CJK 字符不算——中文本无词边界，且这保证
+/// 混合句「然后 like 这个」里的 like 两侧（CJK）不构成边界阻挡。
+fn is_ascii_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// 词条是否走「英文词边界」匹配：纯 ASCII 且至少含一个字母数字
+/// （如 don't、you know、right?）；含 CJK 的词保持子串匹配的现行为。
+fn is_boundary_entry(chars: &[char]) -> bool {
+    chars.iter().all(|c| c.is_ascii()) && chars.iter().any(|c| c.is_ascii_alphanumeric())
+}
+
 /// 最长优先（longest-first）词表匹配器：从左到右扫描文本，每个位置优先命中
 /// 该位置起始的最长词条，命中后跳过整个词长。避免「然后就是」被拆成
 /// 「然后」+「就是」、「大吃一惊」里再计一次「吃惊」这类重复计数。
+///
+/// 英文词条（纯 ASCII，含撇号如 don't、含空格短语如 you know）按词边界匹配
+/// （等效 \b 语义）：匹配起点前一字符与终点后一字符都不得是英文字母/数字/
+/// 下划线——「like」不再命中「likely」、「so」不再命中「sorted」；多词短语
+/// 整体匹配即可（短语两侧边界即逐词边界）。英文词条同时大小写不敏感
+/// （ASR 输出大小写不可控，句首 "Like" 也该数）。含 CJK 的词条保持子串匹配
+/// 与大小写敏感（中文无此问题）。
 pub struct WordMatcher {
     /// 词原文（供回传借用引用）
     words: Vec<String>,
     /// 与 words 平行的字符数组（避免逐次分配）
     char_words: Vec<Vec<char>>,
-    /// 首字 → 词下标（同首字按词长降序）
+    /// 与 words 平行：是否英文边界词条
+    boundary: Vec<bool>,
+    /// 首字符（ASCII 词取小写）→ 词下标（同首字按词长降序）
     by_first: HashMap<char, Vec<usize>>,
 }
 
@@ -194,17 +244,19 @@ impl WordMatcher {
             .filter(|w| !w.is_empty()) // 空词条无意义，先剔除保证索引对齐
             .collect();
         let mut char_words: Vec<Vec<char>> = Vec::with_capacity(words.len());
+        let mut boundary: Vec<bool> = Vec::with_capacity(words.len());
         let mut by_first: HashMap<char, Vec<usize>> = HashMap::new();
         for (i, w) in words.iter().enumerate() {
             let cw: Vec<char> = w.chars().collect();
-            by_first.entry(cw[0]).or_default().push(i);
+            by_first.entry(cw[0].to_ascii_lowercase()).or_default().push(i);
+            boundary.push(is_boundary_entry(&cw));
             char_words.push(cw);
         }
         // 同首字：长词在前（最长优先）
         for ids in by_first.values_mut() {
             ids.sort_by(|&a, &b| char_words[b].len().cmp(&char_words[a].len()));
         }
-        Self { words, char_words, by_first }
+        Self { words, char_words, boundary, by_first }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -215,6 +267,33 @@ impl WordMatcher {
         &self.words
     }
 
+    /// 词条 wi 在 chars[pos..] 处是否命中；命中返回词长（找不到返回 None）。
+    /// 英文边界词条：两侧不得是 ASCII 词内字符，且大小写不敏感比较。
+    fn match_at(&self, wi: usize, chars: &[char], pos: usize) -> Option<usize> {
+        let w = &self.char_words[wi];
+        if pos + w.len() > chars.len() {
+            return None;
+        }
+        if self.boundary[wi] {
+            // \b 语义：等效正则 \w（ASCII 部分）——CJK 字符不阻挡边界
+            if pos > 0 && is_ascii_word_char(chars[pos - 1]) {
+                return None;
+            }
+            let end = pos + w.len();
+            if end < chars.len() && is_ascii_word_char(chars[end]) {
+                return None;
+            }
+            for (i, wc) in w.iter().enumerate() {
+                if wc.to_ascii_lowercase() != chars[pos + i].to_ascii_lowercase() {
+                    return None;
+                }
+            }
+        } else if chars[pos..pos + w.len()] != w[..] {
+            return None;
+        }
+        Some(w.len())
+    }
+
     /// 返回按出现顺序的全部命中（含同词多次出现）。
     pub fn find_all(&self, text: &str) -> Vec<&str> {
         let chars: Vec<char> = text.chars().collect();
@@ -222,12 +301,12 @@ impl WordMatcher {
         let mut pos = 0usize;
         while pos < chars.len() {
             let mut matched = None;
-            if let Some(ids) = self.by_first.get(&chars[pos]) {
+            if let Some(ids) = self.by_first.get(&chars[pos].to_ascii_lowercase()) {
                 for &wi in ids {
-                    let w = &self.char_words[wi];
-                    if pos + w.len() <= chars.len() && chars[pos..pos + w.len()] == w[..] {
-                        matched = Some((wi, w.len()));
-                        break; // 同首字已按长度降序，首个命中即最长
+                    // 同首字已按长度降序，首个命中即最长（边界不满足会继续试短词）
+                    if let Some(len) = self.match_at(wi, &chars, pos) {
+                        matched = Some((wi, len));
+                        break;
                     }
                 }
             }
@@ -331,6 +410,100 @@ mod tests {
         let m = WordMatcher::new(Vec::<String>::new());
         assert!(m.is_empty());
         assert!(m.find_all("任意文本").is_empty());
+    }
+
+    // --- 英文词边界匹配（等效 \b 语义；含 CJK 的词条保持子串行为） ---------
+
+    #[test]
+    fn matcher_english_word_boundary() {
+        let m = WordMatcher::new(["like"]);
+        // like 不再命中 likely / unlike（子词误报）
+        assert!(m.find_all("this is likely fine").is_empty());
+        assert!(m.find_all("unlikely candidate").is_empty());
+        // 独立成词才命中：两侧是标点/空格/边界
+        assert_eq!(m.find_all("I like it"), vec!["like"]);
+        assert_eq!(m.find_all("like, um, like"), vec!["like", "like"]);
+    }
+
+    #[test]
+    fn matcher_english_boundary_case_insensitive() {
+        let m = WordMatcher::new(["like", "you know"]);
+        // 句首大写也能命中（ASR 输出大小写不可控）
+        assert_eq!(m.find_all("Like, You know what I mean"), vec!["like", "you know"]);
+    }
+
+    #[test]
+    fn matcher_english_boundary_with_cjk_neighbors() {
+        // CJK 字符不构成边界阻挡（\w 只算 ASCII）：混合句里的英文口头禅照常命中
+        let m = WordMatcher::new(["um"]);
+        assert_eq!(m.find_all("然后 um 我们继续"), vec!["um"]);
+    }
+
+    #[test]
+    fn matcher_phrase_with_apostrophe_and_spaces() {
+        let m = WordMatcher::new(["don't", "you know", "kind of"]);
+        assert_eq!(m.find_all("I don't know, you know?"), vec!["don't", "you know"]);
+        assert_eq!(m.find_all("kind of works"), vec!["kind of"]);
+        // 短语不被子词误报拆坏
+        assert!(m.find_all("kindness of the team").is_empty());
+    }
+
+    #[test]
+    fn matcher_longest_first_still_wins_for_english() {
+        // sort of 先于 so（最长优先不变）；so 也不命中 sorted（边界）
+        let m = WordMatcher::new(["so", "sort of"]);
+        assert_eq!(m.find_all("it's sort of fine"), vec!["sort of"]);
+        assert_eq!(m.find_all("sorted list, so we proceed"), vec!["so"]);
+    }
+
+    #[test]
+    fn matcher_cjk_words_keep_substring_behavior() {
+        // 含 CJK 的词条保持现行为（子串匹配、大小写敏感不受影响）
+        let m = WordMatcher::new(["然后", "就是"]);
+        assert_eq!(m.find_all("然后就是没问题"), vec!["然后", "就是"]);
+    }
+
+    // --- 英文词库加载与规模校验 ----------------------------------------------
+
+    #[test]
+    fn english_lexicon_parses_and_counts_match_meta() {
+        let lex = builtin_lexicon_en();
+        assert_eq!(lex.fillers.high.len() + lex.fillers.medium.len(), 36);
+        assert_eq!(lex.hedges.len(), 27);
+        assert_eq!(lex.vague_to_precise.len(), 76);
+        // 与 _meta.counts 程序校验一致（README 维护纪律）
+        assert_eq!(lex.meta["counts"]["fillers_high"], 17);
+        assert_eq!(lex.meta["counts"]["fillers_medium"], 19);
+        assert_eq!(lex.meta["counts"]["hedges"], 27);
+        assert_eq!(lex.meta["counts"]["vagueToPrecise"], 76);
+        // 自建声明与 MIT 授权在位
+        assert_eq!(lex.meta["license"], "MIT");
+    }
+
+    #[test]
+    fn english_lexicon_entries_are_pure_ascii_with_alternatives() {
+        let lex = builtin_lexicon_en();
+        // 全部词条应为纯 ASCII（边界匹配的前提；混入 CJK 属词库错误）
+        let all: Vec<&str> = lex
+            .fillers
+            .high
+            .iter()
+            .chain(lex.fillers.medium.iter())
+            .chain(lex.hedges.iter())
+            .chain(lex.vague_to_precise.keys())
+            .map(|s| s.as_str())
+            .collect();
+        assert!(all.iter().all(|w| w.is_ascii() && w.chars().any(|c| c.is_ascii_alphanumeric())));
+        // 每组 vagueToPrecise 至少 2 个非空替代（质量底线，无同义反复凑数）
+        for (k, v) in &lex.vague_to_precise {
+            assert!(v.len() >= 2, "「{k}」替代词不足 2 个");
+            assert!(v.iter().all(|a| !a.trim().is_empty() && a != k));
+        }
+        // high/medium 与 hedges 内部各自无重复词条
+        let mut sorted_high = lex.fillers.high.clone();
+        sorted_high.sort();
+        sorted_high.dedup();
+        assert_eq!(sorted_high.len(), lex.fillers.high.len());
     }
 
     // --- 用户词库合并（词库自生长：用户条目优先、同词覆盖） -------------------

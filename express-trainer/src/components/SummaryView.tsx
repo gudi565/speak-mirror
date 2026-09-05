@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { hasRemoteBackend } from "../lib/settings";
 import { SCENARIOS, scenarioMeta } from "../lib/scenarios";
 import { REPORT_MODE_OPTIONS } from "../lib/report";
+import { sentencesCjkRatio } from "../lib/lang";
 import { playGlyph, playbackAvailable } from "../lib/playback";
 import { tonePanelState } from "../lib/tone";
 import { useSentencePlayer } from "../hooks/useSentencePlayer";
@@ -65,11 +66,13 @@ export function SummaryView({
 
   const remoteReady = settings ? hasRemoteBackend(settings) : false;
 
-  // 声调提示面板状态：开关关闭隐藏；无录音 / 分析中 / 无发现 / 有标记四态
+  // 声调提示面板状态：开关关闭或英文练习（CJK 占比 <30%，普通话声调分析
+  // 不适用）隐藏；无录音 / 分析中 / 无发现 / 有标记四态
   const toneState = tonePanelState({
     toneCheck: settings?.toneCheck ?? true,
     audioPath,
     toneFlags,
+    cjkRatio: sentencesCjkRatio(sentences),
   });
 
   return (

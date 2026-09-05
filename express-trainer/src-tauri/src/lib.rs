@@ -414,15 +414,21 @@ fn spawn_tone_analysis(app: &AppHandle, state: &AppState) -> Vec<tone::ToneFlag>
 
 /// 字幕红色标注用的口头禅词表（词库分级 + 用户词库 + 自定义）。
 /// 高频与自定义词优先展示；中频词误报率高，仅在右栏统计里出现。
+/// 英文词库的分级词一并并入（中英词文字不相交，前端统一走词边界高亮）。
 #[tauri::command]
 fn get_filler_words(app: AppHandle) -> serde_json::Value {
     // 先应用用户词库（user-lexicon.json 里的自定义 filler 并入 high 档）
     growth::apply_user_lexicon_from_disk(&app);
     let s = settings::load(&app).normalized();
     let lex = rules::lexicon::lexicon();
+    let en = rules::lexicon::builtin_lexicon_en();
+    let mut high: Vec<String> = lex.fillers.high.clone();
+    high.extend(en.fillers.high.iter().cloned());
+    let mut medium: Vec<String> = lex.fillers.medium.clone();
+    medium.extend(en.fillers.medium.iter().cloned());
     json!({
-        "high": lex.fillers.high,
-        "medium": lex.fillers.medium,
+        "high": high,
+        "medium": medium,
         "custom": settings::parse_custom_fillers(&s.custom_fillers),
     })
 }

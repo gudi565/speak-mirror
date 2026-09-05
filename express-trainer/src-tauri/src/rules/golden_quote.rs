@@ -1,4 +1,5 @@
 use super::imagery::IMAGERY_MARKERS;
+use super::lang::{detect_lang, SentenceLang};
 use super::{FeedbackEvent, FeedbackKind, Rule, Sentence, SessionContext};
 
 /// 每会话最多提示的金句句数（宁缺毋滥：宁可漏掉，不可刷屏）
@@ -80,7 +81,8 @@ pub fn golden_quote_reasons(text: &str) -> Vec<&'static str> {
     reasons
 }
 
-/// 金句捕捉规则（正向）：一句同时满足 ≥2 个启发式信号即候选——
+/// 金句捕捉规则（正向，中文特有——四字格等启发式对英文无意义，英文句跳过）：
+/// 一句同时满足 ≥2 个启发式信号即候选——
 /// ①比喻标记 ②数字+结论词 ③两个及以上四字格 ④句长 12–30 且含强调结构。
 /// 每会话最多提示 3 句（规则内部上限）；句间冷却由引擎统一节流（同类 3 句冷却）。
 pub struct GoldenQuoteRule {
@@ -101,6 +103,9 @@ impl Default for GoldenQuoteRule {
 
 impl Rule for GoldenQuoteRule {
     fn on_sentence(&mut self, sentence: &Sentence, _ctx: &SessionContext) -> Vec<FeedbackEvent> {
+        if detect_lang(&sentence.text) != SentenceLang::Chinese {
+            return Vec::new(); // 英文/无字母句跳过：启发式信号是中文特有
+        }
         if self.produced >= GOLDEN_QUOTE_MAX_PER_SESSION {
             return Vec::new();
         }
@@ -236,5 +241,16 @@ mod tests {
         let r = golden_quote_reasons("这就像把 3 个月的工作压缩到 3 周");
         assert_eq!(r, vec!["比喻", "数字结论"]);
         assert!(golden_quote_reasons("普通的一句话").is_empty());
+    }
+
+    #[test]
+    fn english_sentence_is_skipped() {
+        // 英文句不做金句启发（四字格/对仗等信号对英文无意义）
+        let mut rule = GoldenQuoteRule::new();
+        let ctx = SessionContext::default();
+        // 数字 + 就类结论词 + 比喻标记凑双信号也不触发
+        assert!(rule
+            .on_sentence(&sent(1, "It is like cutting 3 months of work down to 3 weeks"), &ctx)
+            .is_empty());
     }
 }

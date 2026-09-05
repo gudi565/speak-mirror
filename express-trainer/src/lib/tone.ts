@@ -5,6 +5,7 @@
  */
 
 import type { ToneFlag } from "../types";
+import { CJK_RATIO_THRESHOLD } from "./lang";
 
 /** 声调数字 → 中文（1–4；5 = 轻声） */
 export const TONE_CN: Record<number, string> = {
@@ -45,18 +46,22 @@ export type TonePanelState = "hidden" | "noAudio" | "analyzing" | "clean" | "fla
 
 /**
  * 面板状态判定（纯函数）：
- * - hidden：设置里关闭了声调检查 → 面板整体不显示
+ * - hidden：设置里关闭了声调检查，或会话 CJK 占比 <30%（英文练习——普通话
+ *   声调分析对英文无意义）→ 面板整体不显示
  * - noAudio：本次会话没有录音（未开启会话录音 / 截断 / 写失败）
  * - analyzing：开关开、有录音、但还没收到 tone_update（后端分析中）
  * - clean：已分析、无发现
  * - flags：有标记 → 列表
+ * cjkRatio 缺省 / null（未知、空会话、旧调用方）按中文处理，行为不变。
  */
 export function tonePanelState(opts: {
   toneCheck: boolean;
   audioPath: string | null;
   toneFlags: ToneFlag[] | null;
+  cjkRatio?: number | null;
 }): TonePanelState {
   if (!opts.toneCheck) return "hidden";
+  if (opts.cjkRatio != null && opts.cjkRatio < CJK_RATIO_THRESHOLD) return "hidden";
   if (!opts.audioPath) return "noAudio";
   if (opts.toneFlags === null) return "analyzing";
   return opts.toneFlags.length > 0 ? "flags" : "clean";

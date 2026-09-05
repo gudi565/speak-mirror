@@ -1,3 +1,4 @@
+use super::lang::{detect_lang, SentenceLang};
 use super::lexicon::{lexicon, WordMatcher};
 use super::{FeedbackEvent, FeedbackKind, Rule, Sentence, SessionContext};
 use std::collections::{HashMap, HashSet};
@@ -5,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 /// 时间模糊规则：词库 timeVague（25 条模糊时间词 → 具体化建议）。
 /// 命中即温和提示，payload 带词库里的建议替代；每词每会话最多提示一次。
 /// （顶层 JSON 的 description 是元数据键，构造时已跳过。）
+/// 英文句直接跳过（时间模糊词表是中文特有数据，英文侧不强做）。
 pub struct TimeVagueRule {
     matcher: WordMatcher,
     suggestions: HashMap<String, String>,
@@ -36,6 +38,9 @@ impl Default for TimeVagueRule {
 
 impl Rule for TimeVagueRule {
     fn on_sentence(&mut self, sentence: &Sentence, _ctx: &SessionContext) -> Vec<FeedbackEvent> {
+        if detect_lang(&sentence.text) != SentenceLang::Chinese {
+            return Vec::new(); // 英文/无字母句跳过：时间模糊词表是中文特有数据
+        }
         let mut events = Vec::new();
         for word in self.matcher.find_distinct(&sentence.text) {
             if self.reminded.contains(word) {
@@ -107,5 +112,13 @@ mod tests {
         let mut rule = TimeVagueRule::default();
         let ctx = SessionContext::default();
         assert!(rule.on_sentence(&sent(1, "上周三我们开了复盘会"), &ctx).is_empty());
+    }
+
+    #[test]
+    fn english_sentence_is_skipped() {
+        // 英文句不做时间模糊匹配（中文特有规则；英文「soon / later」不强做）
+        let mut rule = TimeVagueRule::default();
+        let ctx = SessionContext::default();
+        assert!(rule.on_sentence(&sent(1, "We will finish it soon, maybe later"), &ctx).is_empty());
     }
 }

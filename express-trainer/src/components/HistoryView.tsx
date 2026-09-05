@@ -5,6 +5,7 @@ import { fetchSessionDetail, fetchSessionSummaries, fmtDuration, goalStatus, goa
 import { scenarioLabel } from "../lib/scenarios";
 import { playGlyph, playbackAvailable } from "../lib/playback";
 import { reportModeLabel } from "../lib/report";
+import { CJK_RATIO_THRESHOLD, sentencesCjkRatio } from "../lib/lang";
 import { useSentencePlayer } from "../hooks/useSentencePlayer";
 import { ToneFlagsPanel } from "./ToneFlagsPanel";
 import type { SessionRecord, SessionSummary, Settings } from "../types";
@@ -269,8 +270,11 @@ export function HistoryView({ settings, onBack }: Props) {
           </div>
         )}
 
-        {/* 声调提示（该次会话的离线分析结果有标记时展示） */}
-        {detail.snapshot.toneFlags && detail.snapshot.toneFlags.length > 0 && (
+        {/* 声调提示（该次会话的离线分析结果有标记时展示；英文练习 CJK 占比
+            <30% 时不展示——普通话声调分析对英文无意义） */}
+        {detail.snapshot.toneFlags &&
+          detail.snapshot.toneFlags.length > 0 &&
+          (sentencesCjkRatio(detail.transcript) ?? 1) >= CJK_RATIO_THRESHOLD && (
           <div className="mt-4">
             <div className="mb-1 flex items-baseline justify-between">
               <span className="text-sm font-medium text-neutral-700">声调提示</span>

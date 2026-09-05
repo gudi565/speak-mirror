@@ -13,6 +13,11 @@ SpeakMirror 是一个跑在你自己电脑上的表达陪练：点「开始练�
 - **声调提示（v0.2.4 起，v0.2.6 支持三声变调与音域归一）**：练习结束后对本机录音做普通话声调偏差分析（纯本地 DSP，无需联网），逐句定位「应为几声」，每条提示可一键回放该句试听；多重置信门控，宁可漏报不误报
 - **成长档案**：每次练习自动落盘，历史页查看趋势（口头禅频率 / 语速 / 停顿）与目标达成情况，报告自动「对比上次」
 
+## 英文练习支持 / English Practice
+
+直接说英文即可：识别、实时规则（英文口头禅/词汇精确度/立场模糊，按词边界匹配）与 AI 报告（英文八节/快速报告模板）自动切换，无需设置；界面语言保持中文，普通话声调分析对英文练习自动隐藏。
+Just speak English: recognition, real-time rules (English fillers / vocabulary precision / hedging, matched on word boundaries) and AI reports (English full/quick templates) switch automatically — no configuration needed; the UI stays in Chinese and Mandarin tone analysis hides itself for English sessions.
+
 ## 安装（Windows）
 
 ### 方式一：安装包

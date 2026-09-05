@@ -1,13 +1,14 @@
 pub mod filler;
 pub mod golden_quote;
+pub mod hedge;
+pub mod imagery;
+pub mod lang;
 pub mod lexicon;
 pub mod precision;
 pub mod repetition;
 pub mod structure;
 pub mod emotion;
-pub mod hedge;
 pub mod time_vague;
-pub mod imagery;
 pub mod engine;
 
 use serde::{Deserialize, Serialize};

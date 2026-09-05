@@ -3,7 +3,7 @@ use super::filler::{FillerWordsRule, DEFAULT_MEDIUM_THRESHOLD_PER_MIN};
 use super::golden_quote::GoldenQuoteRule;
 use super::hedge::HedgeRule;
 use super::imagery::ImageryRule;
-use super::lexicon::{lexicon, WordMatcher};
+use super::lexicon::{builtin_lexicon_en, lexicon, WordMatcher};
 use super::precision::PrecisionRule;
 use super::repetition::RepetitionRule;
 use super::structure::{ConclusionMissingRule, ExampleMissingRule};
@@ -166,13 +166,18 @@ impl RuleEngine {
             push(Box::new(GoldenQuoteRule::new()), DEFAULT_COOLDOWN_SENTENCES, &mut slots);
         }
 
-        // 统计扫描器始终构建（统计与规则开关解耦）
+        // 统计扫描器始终构建（统计与规则开关解耦）。口头禅/立场模糊词的扫描
+        // 词表为中英两套词库的并集：两表文字不相交（中文词全 CJK、英文词全
+        // ASCII），并成一个匹配器即等价于按语言分别扫描，且天然不重复计数
         let lex = lexicon();
+        let en_lex = builtin_lexicon_en();
         let mut filler_words: Vec<String> = lex
             .fillers
             .high
             .iter()
             .chain(lex.fillers.medium.iter())
+            .chain(en_lex.fillers.high.iter())
+            .chain(en_lex.fillers.medium.iter())
             .cloned()
             .collect();
         for w in &config.custom_fillers {
@@ -180,12 +185,20 @@ impl RuleEngine {
                 filler_words.push(w.clone());
             }
         }
+        let mut hedge_words: Vec<String> = lex
+            .hedges
+            .iter()
+            .chain(en_lex.hedges.iter())
+            .cloned()
+            .collect();
+        hedge_words.sort_unstable();
+        hedge_words.dedup();
         Self {
             slots,
             ctx: SessionContext::default(),
             last_end_ms: 0,
             filler_scan: WordMatcher::new(filler_words),
-            hedge_scan: WordMatcher::new(lex.hedges.clone()),
+            hedge_scan: WordMatcher::new(hedge_words),
         }
     }
 
@@ -524,6 +537,56 @@ mod tests {
             .snapshot()
             .filler_counts
             .contains(&("老铁".to_string(), 1)));
+    }
+
+    // --- 英文会话：统计与规则路由 --------------------------------------------
+
+    #[test]
+    fn english_session_counts_english_fillers_and_hedges() {
+        let mut engine = RuleEngine::new();
+        engine.start(0);
+        engine.ingest(sent(1, "Um, you know, maybe I think it works", 60_000));
+        let snap = engine.snapshot();
+        // fillerCounts 天然按词分开：英文词独立计数，无需结构变更
+        assert!(snap.filler_counts.contains(&("um".to_string(), 1)));
+        assert!(snap.filler_counts.contains(&("you know".to_string(), 1)));
+        assert!(snap.hedge_counts.contains(&("maybe".to_string(), 1)));
+        assert!(snap.hedge_counts.contains(&("I think".to_string(), 1)));
+        // likely 里的 like 不计（词边界）
+        engine.ingest(sent(2, "This is likely the best outcome", 120_000));
+        let snap = engine.snapshot();
+        assert!(!snap.filler_counts.iter().any(|(w, _)| w == "like"));
+    }
+
+    #[test]
+    fn english_sentences_skip_chinese_only_rules() {
+        let mut engine = RuleEngine::new();
+        engine.start(0);
+        // 这些句在中文规则下会触发金句/情绪/时间模糊/画面感，英文侧全部跳过
+        let events = engine.ingest(sent(1, "It is like a mirror, 3 weeks of work into 3 days", 60_000));
+        let events2 = engine.ingest(sent(2, "I was so happy and very busy recently", 120_000));
+        for evs in [&events, &events2] {
+            assert!(evs.iter().all(|e| !matches!(
+                e.kind,
+                FeedbackKind::Emotion
+                    | FeedbackKind::TimeVague
+                    | FeedbackKind::Imagery
+                    | FeedbackKind::GoldenQuote
+            )));
+        }
+        // 重复/结论缺失/举例缺失是语言无关启发式，英文照常运行
+        let e3 = engine.ingest(sent(3, "It is like a mirror, 3 weeks of work into 3 days", 180_000));
+        assert!(e3.iter().any(|e| e.kind == FeedbackKind::Repetition));
+    }
+
+    #[test]
+    fn mixed_sentence_counts_both_scripts_in_stats() {
+        let mut engine = RuleEngine::new();
+        engine.start(0);
+        engine.ingest(sent(1, "然后 um 我们继续说这个方案", 60_000));
+        let snap = engine.snapshot();
+        assert!(snap.filler_counts.contains(&("然后".to_string(), 1)));
+        assert!(snap.filler_counts.contains(&("um".to_string(), 1)));
     }
 
     #[test]
