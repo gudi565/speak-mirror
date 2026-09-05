@@ -169,9 +169,11 @@ pub fn missing_sense_voice(models_dir: &Path) -> Vec<String> {
 
 /// 模型目录搜索顺序：
 /// 1. 应用数据目录（安装版首启引导的下载位置）
-/// 2. exe 同级 models/（便携部署手动放置）
-/// 3. resource_dir/../models（Tauri 开发模式）
-/// 4. 仓库根 models/（开发模式：crate 根的上一级）
+/// 2. exe 同级 models/（便携部署手动放置；Windows 全量包资源落点）
+/// 3. resource_dir/models（macOS 全量包：Contents/Resources/models；
+///    Windows 下若 resource_dir 即安装目录则与 2 等价）
+/// 4. resource_dir/../models（Tauri 开发模式）
+/// 5. 仓库根 models/（开发模式：crate 根的上一级）
 fn models_search_paths(app: &AppHandle) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(data) = app.path().app_data_dir() {
@@ -183,6 +185,7 @@ fn models_search_paths(app: &AppHandle) -> Vec<PathBuf> {
         }
     }
     if let Ok(res) = app.path().resource_dir() {
+        paths.push(res.join("models"));
         paths.push(res.join("..").join("models"));
     }
     paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("models"));

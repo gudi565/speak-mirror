@@ -92,3 +92,88 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: express-trainer/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+
+  # 全量离线安装包：内置识别模型（约 380MB+），安装即用、全程不联网
+  release-windows-full:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: express-trainer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: express-trainer/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          working-directory: express-trainer/src-tauri
+      - name: 安装前端依赖
+        run: npm ci
+      - name: 下载识别模型（打包用，仅 int8）
+        shell: bash
+        run: |
+          mkdir -p models
+          curl -fsSL -o models/silero_vad.onnx https://huggingface.co/csukuangfj/vad/resolve/main/silero_vad.onnx
+          curl -fsSL -o p.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2
+          tar -xjf p.tar.bz2 -C models
+          curl -fsSL -o s.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+          tar -xjf s.tar.bz2 -C models
+          rm -f p.tar.bz2 s.tar.bz2 models/*/encoder.onnx models/*/decoder.onnx models/*/model.onnx
+      - name: 构建全量安装包（内置模型）
+        run: npm run tauri build -- --config src-tauri/tauri.full.conf.json
+      - name: 重命名并挂载
+        shell: bash
+        run: |
+          mv src-tauri/target/release/bundle/nsis/*-setup.exe src-tauri/target/release/bundle/nsis/SpeakMirror-full-x64-setup.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: express-trainer/src-tauri/target/release/bundle/nsis/SpeakMirror-full-x64-setup.exe
+
+  release-macos-full:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: express-trainer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: express-trainer/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+      - uses: swatinem/rust-cache@v2
+        with:
+          working-directory: express-trainer/src-tauri
+      - name: 安装前端依赖
+        run: npm ci
+      - name: 下载识别模型（打包用，仅 int8）
+        run: |
+          mkdir -p models
+          curl -fsSL -o models/silero_vad.onnx https://huggingface.co/csukuangfj/vad/resolve/main/silero_vad.onnx
+          curl -fsSL -o p.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2
+          tar -xjf p.tar.bz2 -C models
+          curl -fsSL -o s.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+          tar -xjf s.tar.bz2 -C models
+          rm -f p.tar.bz2 s.tar.bz2 models/*/encoder.onnx models/*/decoder.onnx models/*/model.onnx
+      - name: 构建全量 dmg（内置模型，通用二进制）
+        run: npm run tauri build -- --target universal-apple-darwin --config src-tauri/tauri.full.conf.json
+      - name: 重命名并挂载
+        run: |
+          mv src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg src-tauri/target/universal-apple-darwin/release/bundle/dmg/SpeakMirror-full-universal.dmg
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: express-trainer/src-tauri/target/universal-apple-darwin/release/bundle/dmg/SpeakMirror-full-universal.dmg

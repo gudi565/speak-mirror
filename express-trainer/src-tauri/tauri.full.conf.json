@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../models/silero_vad.onnx": "models/silero_vad.onnx",
+      "../models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/encoder.int8.onnx": "models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/encoder.int8.onnx",
+      "../models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/decoder.int8.onnx": "models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/decoder.int8.onnx",
+      "../models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/tokens.txt": "models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/tokens.txt",
+      "../models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/README.md": "models/sherpa-onnx-streaming-paraformer-bilingual-zh-en/README.md",
+      "../models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx": "models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx",
+      "../models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt": "models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt",
+      "../models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/LICENSE": "models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/LICENSE",
+      "../models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/README.md": "models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/README.md"
+    }
+  }
+}
