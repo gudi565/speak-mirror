@@ -18,15 +18,22 @@ SpeakMirror 是一个跑在你自己电脑上的表达陪练：点「开始练�
 直接说英文即可：识别、实时规则（英文口头禅/词汇精确度/立场模糊，按词边界匹配）与 AI 报告（英文八节/快速报告模板）自动切换，无需设置；界面语言保持中文，普通话声调分析对英文练习自动隐藏。
 Just speak English: recognition, real-time rules (English fillers / vocabulary precision / hedging, matched on word boundaries) and AI reports (English full/quick templates) switch automatically — no configuration needed; the UI stays in Chinese and Mandarin tone analysis hides itself for English sessions.
 
-## 安装（Windows）
+## 安装（Windows / macOS）
 
-### 方式一：安装包
+### Windows
 
-1. 从 [Releases](../../releases) 下载 `SpeakMirror_0.2.6_x64-setup.exe`
+1. 从 [Releases](../../releases) 下载 `SpeakMirror_0.2.7_x64-setup.exe`
 2. 双击安装（安装语言可选简体中文 / English，默认安装到当前用户目录，无需管理员权限）
 3. 启动后进入首启引导，按提示完成即可开始练习
 
-### 方式二：从源码构建
+### macOS（Apple Silicon 与 Intel 均可）
+
+1. 从 [Releases](../../releases) 下载 `SpeakMirror_..._universal.dmg`
+2. 打开 dmg，将 SpeakMirror 拖入「应用程序」文件夹
+3. **首次打开**：因未购买开发者签名证书，需在「应用程序」中**右键 → 打开**（或在「系统设置 → 隐私与安全性」点「仍要打开」）
+4. 首次练习时 macOS 会弹麦克风权限对话框，点「允许」即可（音频不离开本机）
+
+### 从源码构建（任意平台）
 
 要求：Node 18+、Rust 1.75+（MSVC 工具链）、Windows 10/11。
 
@@ -37,7 +44,7 @@ npm install
 npm run tauri build
 ```
 
-构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.6_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
+构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.7_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
 
 开发调试：`npm run tauri dev`。测试：`cd src-tauri && cargo test`（Rust 规则引擎）与 `npm test`（前端）。
 
@@ -107,4 +114,4 @@ powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
 
 ---
 
-SpeakMirror v0.2.6 · 免责：本地处理语音，API Key 仅存本地。
+SpeakMirror v0.2.7 · 免责：本地处理语音，API Key 仅存本地。
