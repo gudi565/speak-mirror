@@ -1,10 +1,21 @@
-//! 普通话声调偏差检查（v0：纯 DSP + 词典启发式，不训练模型）。
+//! 普通话声调偏差检查（v1：纯 DSP + 词典启发式 + 变调规则 + 音域归一，不训练模型）。
 //!
 //! 产品定位：声韵调级评分在开源世界无成品、商业云只做 B2B——这是差异化空白。
-//! v0 只做「会话结束后的声调偏差提示」：对录音逐句做基音（F0）轨迹分析，
+//! 做的是「会话结束后的声调偏差提示」：对录音逐句做基音（F0）轨迹分析，
 //! 按能量包络粗切音节，每音节轮廓归为五类声调形状（高平/升/降升/降/短轻），
 //! 与内嵌词典的期望声调比对，高置信的偏差才标记——接总结页逐句回放，
 //! 形成「看提示 → 点播放对照」的闭环。
+//!
+//! v1 修掉 v0 的两大误报源头：
+//! 1. 三声变调（最大误报源）：期望声调序列生成时应用变调规则——
+//!    3+3 前字读作二声（「你好」实际 ní-hǎo），升形不算错；
+//!    3+非3（非句末）读半三（低平或降升均可），低平不算错。
+//!    规则只放宽不收紧：规则解释得了的实测形状一律不标，
+//!    规则解释不了的真偏差照标，并在 note 里说明适用规则。
+//! 2. 句内基线归一：取句内所有浊音帧 F0 的中位数与四分位距注册说话人音域，
+//!    把音节的绝对音高换算成音域百分位——高平（一声）与低平（半三）的区分
+//!    从「绝对半音」改为「相对音域位置」，解决高/低音域说话人的 1↔3 互串。
+//!    浊音帧不足 30（<300ms 语音）时无基线，退回 v0 绝对形状分类（不比 v0 差）。
 //!
 //! 置信门控策略（宁缺毋滥，误报是声调提示的致命伤）：
 //! 1. 音节数门控：能量峰估计的音节数与句内汉字数误差 >30% → 整句跳过；
@@ -319,20 +330,225 @@ pub fn classify_shape(d_mid: f64, d_end: f64, voiced_frames: usize) -> Option<Sh
     None
 }
 
-/// 词典声调 vs 检测形状的偏差判定（纯函数）：置信不足/短轻/轻声读音不标；
-/// 多音字任一 1–4 声读音匹配形状即通过；不匹配时返回主读音（供展示）。
-pub fn tone_mismatch(tones: &[u8], shape: u8, confidence: f64) -> Option<u8> {
+// ---------------------------------------------------------------------------
+// 句内基线归一（v1）：说话人音域注册 → 音节绝对音高换算音域百分位
+// ---------------------------------------------------------------------------
+
+/// 注册基线所需最少浊音帧数（10ms 步长下 30 帧 ≈ 300ms 语音；
+/// 不足则无基线，平调判定退回 v0 绝对形状分类，保证不比 v0 差）
+pub const MIN_BASELINE_FRAMES: usize = 30;
+/// 单侧音域跨度下限（半音）：范围过窄（近乎单调的句子）时防止百分位被过度拉伸，
+/// 也压低句尾自然降音（declination）把正确一声推到「音域底部」的概率
+pub const MIN_RANGE_SPAN_ST: f64 = 4.0;
+/// 低平（半三）判定上界：音域百分位 ≤ 此值视为低位
+pub const REGISTER_LOW: f64 = 0.40;
+/// 高平判定下界：音域百分位 ≥ 此值视为高位
+pub const REGISTER_HIGH: f64 = 0.60;
+/// 一声「低平真偏差」判定下界：落到音域最底部（≤ 此值）才标——
+/// 句尾自然降音（declination）通常只把音节推到中低位，窄音域句子里
+/// 最低音节也可能落到底部边缘，故阈值取最低一成而非四成
+pub const REGISTER_BOTTOM: f64 = 0.10;
+
+/// 句内说话人音域（基线注册结果，纯数据）
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerRange {
+    /// 浊音帧 F0 中位数（Hz）
+    pub median_hz: f64,
+    /// 单侧音域跨度（半音）：max(p75−中位, 中位−p25, MIN_RANGE_SPAN_ST)
+    pub span_st: f64,
+    /// 参与估计的浊音帧数
+    pub voiced_frames: usize,
+}
+
+/// 句内基线注册（纯函数）：浊音帧 <MIN_BASELINE_FRAMES → None（无基线）。
+/// 中位数抗离群、四分位距定跨度（不取极值，个别误估帧不污染音域）。
+pub fn speaker_range(voiced_f0: &[f64]) -> Option<SpeakerRange> {
+    if voiced_f0.len() < MIN_BASELINE_FRAMES {
+        return None;
+    }
+    let mut sorted = voiced_f0.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid = sorted.len() / 2;
+    let median_hz = if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    };
+    if !(F0_MIN_HZ * 0.5..=F0_MAX_HZ * 2.0).contains(&median_hz) {
+        return None;
+    }
+    // 四分位换算到半音域（相对中位数，单调变换后次序不变）
+    let quartile = |p: usize| -> f64 {
+        let i = (p * (sorted.len() - 1) / 100).min(sorted.len() - 1);
+        12.0 * (sorted[i] / median_hz).log2()
+    };
+    let span_st = quartile(75).max(-quartile(25)).max(MIN_RANGE_SPAN_ST);
+    Some(SpeakerRange { median_hz, span_st, voiced_frames: voiced_f0.len() })
+}
+
+impl SpeakerRange {
+    /// 绝对频率 → 音域百分位（0 = 音域底，1 = 音域顶）。
+    /// 相对说话人本句音域而非绝对 Hz：高音域说话人的低音节与低音域说话人
+    /// 的高音节都能落在正确位置，这是 1↔3 互串修复的核心。
+    pub fn percentile(&self, hz: f64) -> f64 {
+        if !(F0_MIN_HZ * 0.5..=F0_MAX_HZ * 2.0).contains(&hz) || self.median_hz <= 0.0 {
+            return 0.5; // 异常值视作音域中部（不参与极端判定）
+        }
+        let st = 12.0 * (hz / self.median_hz).log2();
+        clamp01(0.5 + st / (2.0 * self.span_st))
+    }
+
+    /// 音节（一组浊音帧）的音域百分位：取帧 F0 中位数，抗逐帧抖动
+    pub fn syllable_percentile(&self, voiced: &[f64]) -> f64 {
+        if voiced.is_empty() {
+            return 0.5;
+        }
+        let mut s = voiced.to_vec();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        self.percentile(s[s.len() / 2])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 变调规则（v1）：三声连读 → 期望声调序列按实际读法放宽
+// ---------------------------------------------------------------------------
+
+/// 变调语境：决定词典声调之外哪些实测形状属正常
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandhiKind {
+    /// 3+3：前字读作二声（升形），如「你好」实际 ní-hǎo；保持全三声（降升）也可
+    ThirdPlusThird,
+    /// 3+非3 且非句末：读半三（低平或降升均可），如「好的」的「好」
+    HalfThird,
+}
+
+/// 一个汉字位置在变调语境下的期望（纯数据，供 match_position 判定）
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionExpectation {
+    /// 词典 1–4 声读音（空 = 仅轻声读音，不作偏差依据）
+    pub base: Vec<u8>,
+    /// 变调语境（None = 无规则适用）
+    pub sandhi: Option<SandhiKind>,
+}
+
+/// 期望声调序列生成（纯函数）：查词典读音 + 应用三声变调规则。
+/// - 3+3：前字进入 ThirdPlusThird（接受升形与降升）；
+/// - 3+非3 且非句末：进入 HalfThird（接受低平与降升，见 match_position）；
+/// - 句末三声保持全三声（降升），不放宽；
+/// - 多音字按「任一读音含三声」参与规则（宁可漏报方向）；
+/// - 后接仅轻声读音的字（如「你们」的「们」）视作非三声 → 前字半三。
+///
+/// TODO(v2)：「一/不」变调（一+四声→二声、一+非四声→四声、不+四声→二声）
+/// 与词级轻声（如「东西」的「西」）需要分词/词表消歧——序数用法（「一楼」
+/// 的一声不变调）按字级规则收紧会把序数误标。词典多读音（一=yi1|yi2|yi4、
+/// 不=bu2|bu4）已使变调后的形状天然通过多音字豁免，故 v1 只放宽不收紧，
+/// 不加规则即可零误报；收紧留待 v2 词表。
+pub fn expected_positions(chars: &[char]) -> Vec<PositionExpectation> {
+    let table = tone_table();
+    let full = |c: char| -> Vec<u8> {
+        table
+            .get(&c)
+            .map(|ts| ts.iter().copied().filter(|t| (1..=4).contains(t)).collect())
+            .unwrap_or_default()
+    };
+    let tones: Vec<Vec<u8>> = chars.iter().map(|c| full(*c)).collect();
+    (0..chars.len())
+        .map(|i| {
+            let has3 = tones[i].contains(&3);
+            let next = tones.get(i + 1);
+            let sandhi = if has3 && next.is_some_and(|t| t.contains(&3)) {
+                Some(SandhiKind::ThirdPlusThird)
+            } else if has3 && next.is_some() {
+                Some(SandhiKind::HalfThird)
+            } else {
+                None
+            };
+            PositionExpectation { base: tones[i].clone(), sandhi }
+        })
+        .collect()
+}
+
+/// 位置判定结果：标记真偏差时给出展示声调与规则说明
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToneVerdict {
+    /// 展示用词典声调（主读音；与 v0 的 tone_mismatch 返回值同口径）
+    pub display_tone: u8,
+    /// 规则说明：变调/音域规则语境下的真偏差附说明（供前端小字展示）；
+    /// 无规则语境的普通偏差为 None
+    pub note: Option<String>,
+}
+
+fn sandhi_note(kind: SandhiKind) -> String {
+    match kind {
+        SandhiKind::ThirdPlusThird => "三声连读，前字应读作二声（升）".into(),
+        SandhiKind::HalfThird => "三声在非三声前读半三（低平）或降升".into(),
+    }
+}
+
+/// 词典声调 + 变调语境 vs 检测形状的偏差判定（v1 纯函数，取代 v0 的 tone_mismatch）。
+/// - 置信不足 / 短轻（5）/ 仅轻声读音 → 不标（v0 语义不变）；
+/// - 升/降/降升形状：词典任一 1–4 声读音匹配即通过；3+3 语境额外豁免升形；
+/// - 平调（1）用音域百分位区分「高平（一声）」与「低平（半三）」：
+///   * 无基线（register=None）：v0 语义 + 半三低平豁免（放宽不依赖基线）；
+///   * 高位（≥REGISTER_HIGH）：算高平，不算半三——半三语境读出高平是真偏差；
+///   * 低位（≤REGISTER_LOW）：算半三；一声仅在落到音域底部（≤REGISTER_BOTTOM）
+///     才算真偏差（句尾自然降音保护带）；
+///   * 中间带：两者皆可（歧义时宁可漏报）。
+///
+/// 返回 None = 通过（含规则豁免）；Some = 真偏差（display_tone + note）。
+pub fn match_position(
+    exp: &PositionExpectation,
+    shape: u8,
+    confidence: f64,
+    register: Option<f64>,
+) -> Option<ToneVerdict> {
     if confidence < FLAG_CONFIDENCE_MIN || shape == 5 {
         return None;
     }
-    let full: Vec<u8> = tones.iter().copied().filter(|t| (1..=4).contains(t)).collect();
-    if full.is_empty() {
+    let base = &exp.base;
+    if base.is_empty() {
         return None; // 只有轻声读音（语气词等）：不标
     }
-    if full.contains(&shape) {
-        return None; // 任一读音匹配 → 通过
+    let flag = |note: Option<String>| {
+        Some(ToneVerdict { display_tone: base[0], note })
+    };
+    let ctx_note = || exp.sandhi.map(sandhi_note);
+    match shape {
+        2 => {
+            // 升：词典含二声，或 3+3 语境（前字变调后实际读二声）
+            let ok = base.contains(&2) || exp.sandhi == Some(SandhiKind::ThirdPlusThird);
+            if ok { None } else { flag(ctx_note()) }
+        }
+        3 => {
+            if base.contains(&3) { None } else { flag(ctx_note()) }
+        }
+        4 => {
+            if base.contains(&4) { None } else { flag(ctx_note()) }
+        }
+        1 => {
+            let tone1_ok = base.contains(&1);
+            let half3_ok = exp.sandhi == Some(SandhiKind::HalfThird);
+            let (accept1, accept3) = match register {
+                None => (tone1_ok, half3_ok),
+                Some(r) if r >= REGISTER_HIGH => (tone1_ok, false),
+                Some(r) if r <= REGISTER_LOW => (tone1_ok && r > REGISTER_BOTTOM, half3_ok),
+                Some(_) => (tone1_ok, half3_ok),
+            };
+            if accept1 || accept3 {
+                return None;
+            }
+            // 真偏差：说明适用规则（半三读高 / 一声读低 / 变调语境 / 普通）
+            let note = if half3_ok && register.is_some_and(|r| r >= REGISTER_HIGH) {
+                Some(sandhi_note(SandhiKind::HalfThird))
+            } else if tone1_ok {
+                Some("一声应保持高平（音域上半区），实测位于音域底部".into())
+            } else {
+                ctx_note()
+            };
+            flag(note)
+        }
+        _ => None,
     }
-    Some(full[0])
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +692,10 @@ pub struct ToneFlag {
     pub expected_tone: u8,
     /// 检测到的形状（1 高平 / 2 升 / 3 降升 / 4 降 / 5 短轻）
     pub detected_shape: u8,
+    /// 规则说明（v1）：变调/音域规则语境下的真偏差附说明（如
+    /// 「三声连读，前字应读作二声（升）」）；普通偏差与旧记录缺省 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// 每句最多标记数（防刷屏；与规则引擎「宁可漏报」同一纪律）
@@ -485,8 +705,9 @@ pub const MIN_ANALYZED_RATIO: f64 = 0.6;
 /// 参与分析的最短句音频时长（秒）
 pub const MIN_SENTENCE_SEC: f64 = 0.25;
 
-/// 句级声调检查（纯函数）：文本 → 词典声调序列，音频 → 逐音节形状，
-/// 高置信偏差才标记。sentence_id 置 0，由 analyze_session/调用方盖印。
+/// 句级声调检查（纯函数）：文本 → 词典声调 + 变调语境（expected_positions），
+/// 音频 → 逐音节形状 + 音域百分位（speaker_range 基线），高置信偏差才标记。
+/// sentence_id 置 0，由 analyze_session/调用方盖印。
 ///
 /// 跳过条件（返回空）：无汉字 / 缺字（词表未收录）/ 音频过短 / 无能量峰 /
 /// 音节数门控不过 / 可分析音节占比 <60%。最多返回 3 条标记。
@@ -510,6 +731,10 @@ pub fn check_sentence(text: &str, samples: &[f32], sample_rate: u32) -> Vec<Tone
     if peaks.is_empty() || !syllable_gate(peaks.len(), chars.len()) {
         return Vec::new();
     }
+    // v1：变调语境期望 + 句内基线（浊音帧不足 30 → None，退回 v0 绝对形状分类）
+    let expected = expected_positions(&chars);
+    let all_voiced: Vec<f64> = series.f0s.iter().filter_map(|f| *f).collect();
+    let baseline = speaker_range(&all_voiced);
     // 边界：0 = boundaries... = 帧数，切成 chars.len() 段
     let mut edges: Vec<usize> = vec![0];
     edges.extend(segment_boundaries(&series.energies, chars.len()));
@@ -529,15 +754,17 @@ pub fn check_sentence(text: &str, samples: &[f32], sample_rate: u32) -> Vec<Tone
             continue; // 短轻不算「可分析」，也不作偏差依据
         }
         analyzed += 1;
-        if let Some(expected) =
-            tone_mismatch(&table[ch], decision.shape as u8, decision.confidence)
+        let register = baseline.as_ref().map(|b| b.syllable_percentile(&voiced));
+        if let Some(verdict) =
+            match_position(&expected[i], decision.shape as u8, decision.confidence, register)
         {
             flags.push(ToneFlag {
                 sentence_id: 0,
                 char_index: i as u32,
                 char: ch.to_string(),
-                expected_tone: expected,
+                expected_tone: verdict.display_tone,
                 detected_shape: decision.shape as u8,
+                note: verdict.note,
             });
         }
     }
@@ -855,6 +1082,279 @@ mod tests {
         assert!(flags.is_empty(), "可分析音节不足 60% 应整句放弃，实测 {flags:?}");
     }
 
+    // --- v1 变调规则表（纯函数） ---------------------------------------------
+
+    #[test]
+    fn expected_positions_applies_third_tone_sandhi() {
+        // 3+3：前字进入「读作二声」语境；句末三声保持全三声，不放宽
+        let e = expected_positions(&['你', '好']);
+        assert_eq!(e[0].base, vec![3]);
+        assert_eq!(e[0].sandhi, Some(SandhiKind::ThirdPlusThird));
+        assert_eq!(e[1].sandhi, None, "句末三声应保持降升");
+        // 3+非3：前字进入半三语境
+        let e = expected_positions(&['马', '妈']);
+        assert_eq!(e[0].sandhi, Some(SandhiKind::HalfThird));
+        assert_eq!(e[1].sandhi, None);
+        // 三连三声「我也想」→ 实际读 2+2+3：前两字都是 3+3 语境
+        let e = expected_positions(&['我', '也', '想']);
+        assert_eq!(e[0].sandhi, Some(SandhiKind::ThirdPlusThird));
+        assert_eq!(e[1].sandhi, Some(SandhiKind::ThirdPlusThird));
+        assert_eq!(e[2].sandhi, None);
+        // 多音字：也（ye3|yi2）任一读音含三声即参与；行（2/4 声）不参与
+        let e = expected_positions(&['也', '想']);
+        assert_eq!(e[0].sandhi, Some(SandhiKind::ThirdPlusThird));
+        let e = expected_positions(&['行', '想']);
+        assert_eq!(e[0].sandhi, None);
+        // 三声 + 仅轻声读音的字（么 me5|…）→ 前字半三（「你们」的「你」同型）
+        let e = expected_positions(&['马', '么']);
+        assert_eq!(e[0].sandhi, Some(SandhiKind::HalfThird));
+    }
+
+    // --- v1 位置匹配（纯函数真值表：变调豁免 / 音域判定 / 门控不变） ----------
+
+    #[test]
+    fn match_position_sandhi_and_register_matrix() {
+        let t3 = PositionExpectation { base: vec![3], sandhi: None };
+        let t3_plus3 = PositionExpectation { base: vec![3], sandhi: Some(SandhiKind::ThirdPlusThird) };
+        let t3_half = PositionExpectation { base: vec![3], sandhi: Some(SandhiKind::HalfThird) };
+        let t1 = PositionExpectation { base: vec![1], sandhi: None };
+        let xing = PositionExpectation { base: vec![2, 4], sandhi: None };
+
+        // 3+3：升形豁免（v0 最大误报源）；全三声也通过；真偏差（降）附规则说明
+        assert!(match_position(&t3_plus3, 2, 0.9, None).is_none(), "3+3 前字升形属正常变调");
+        assert!(match_position(&t3_plus3, 3, 0.9, None).is_none());
+        let v = match_position(&t3_plus3, 4, 0.9, None).unwrap();
+        assert_eq!(v.display_tone, 3);
+        assert!(v.note.as_deref().unwrap().contains("三声连读"));
+        // 平调在 3+3 语境（无论音域）都是真偏差：前字必须升
+        let v = match_position(&t3_plus3, 1, 0.9, Some(0.2)).unwrap();
+        assert!(v.note.as_deref().unwrap().contains("三声连读"));
+
+        // 半三：低平豁免（无基线也豁免——放宽不依赖基线）；降升通过；
+        // 升形真偏差附说明；低平在高音域是真偏差（读得太高）
+        assert!(match_position(&t3_half, 1, 0.9, None).is_none());
+        assert!(match_position(&t3_half, 3, 0.9, None).is_none());
+        assert!(match_position(&t3_half, 1, 0.9, Some(0.2)).is_none());
+        assert!(match_position(&t3_half, 2, 0.9, None).unwrap().note.as_deref().unwrap().contains("半三"));
+        let v = match_position(&t3_half, 1, 0.9, Some(0.8)).unwrap();
+        assert!(v.note.as_deref().unwrap().contains("半三"), "高平的半三是真偏差");
+
+        // 一声：高平通过（有无基线都通过）；低平仅落到音域底部才标
+        assert!(match_position(&t1, 1, 0.9, None).is_none());
+        assert!(match_position(&t1, 1, 0.9, Some(0.9)).is_none());
+        assert!(
+            match_position(&t1, 1, 0.9, Some(0.35)).is_none(),
+            "中低位不标（句尾自然降音保护带）"
+        );
+        let v = match_position(&t1, 1, 0.9, Some(0.1)).unwrap();
+        assert_eq!(v.display_tone, 1);
+        assert!(v.note.is_some(), "一声读进音域底部应附说明");
+
+        // v0 门控语义不变：置信不足 / 短轻（5）/ 仅轻声读音不标
+        assert!(match_position(&t3, 4, 0.5, None).is_none());
+        assert!(match_position(&t3, 5, 0.9, None).is_none());
+        let empty = PositionExpectation { base: vec![], sandhi: None };
+        assert!(match_position(&empty, 4, 0.9, None).is_none());
+
+        // 多音字：任一 1–4 声读音匹配即通过（v0 语义）；平调对 {2,4} 仍标
+        assert!(match_position(&xing, 2, 0.9, None).is_none());
+        assert!(match_position(&xing, 4, 0.9, None).is_none());
+        assert!(match_position(&xing, 1, 0.9, None).is_some());
+    }
+
+    // --- v1 句内基线（纯函数） ------------------------------------------------
+
+    #[test]
+    fn speaker_range_requires_thirty_voiced_frames() {
+        let few: Vec<f64> = (0..MIN_BASELINE_FRAMES - 1).map(|i| 150.0 + i as f64).collect();
+        assert!(speaker_range(&few).is_none(), "样本不足不应注册基线");
+        let enough: Vec<f64> = (0..MIN_BASELINE_FRAMES).map(|i| 150.0 + i as f64).collect();
+        let r = speaker_range(&enough).unwrap();
+        assert_eq!(r.voiced_frames, MIN_BASELINE_FRAMES);
+    }
+
+    #[test]
+    fn speaker_range_percentile_is_relative_not_absolute() {
+        // 高音域说话人（整句 320–520Hz）：中位 = 0.5，两端各自归位
+        let high: Vec<f64> = [320.0; 40].iter().chain([520.0; 40].iter()).copied().collect();
+        let r = speaker_range(&high).unwrap();
+        assert!((r.median_hz - 420.0).abs() < 1e-9);
+        assert!((r.percentile(420.0) - 0.5).abs() < 1e-9, "音域中位应为 0.5");
+        assert!(r.percentile(320.0) <= REGISTER_LOW, "音域底应为低百分位");
+        assert!(r.percentile(520.0) >= REGISTER_HIGH, "音域顶应为高百分位");
+        // 同样轮廓低八度：百分位不变（归一化必须与绝对音高无关）
+        let low: Vec<f64> = [160.0; 40].iter().chain([260.0; 40].iter()).copied().collect();
+        let r2 = speaker_range(&low).unwrap();
+        assert!(
+            (r2.percentile(160.0) - r.percentile(320.0)).abs() < 1e-9
+                && (r2.percentile(260.0) - r.percentile(520.0)).abs() < 1e-9,
+            "高/低音域说话人的对应位置应得到相同百分位"
+        );
+    }
+
+    #[test]
+    fn speaker_range_floor_keeps_narrow_declination_central() {
+        // 句尾自然降音（declination）：四音节 300→240 缓降 3 半音，
+        // 范围窄于跨度下限时最低音节不落进「音域底部」（一声保护带）
+        let vals: Vec<f64> = [300.0, 280.0, 260.0, 240.0]
+            .iter()
+            .flat_map(|f| vec![*f; 12])
+            .collect();
+        let r = speaker_range(&vals).unwrap();
+        assert!(
+            r.percentile(240.0) > REGISTER_BOTTOM,
+            "句尾缓降的最低音节（{:.2}）不应被判到音域底部",
+            r.percentile(240.0)
+        );
+    }
+
+    // --- v1 端到端（合成音节：被规则豁免的不标） -------------------------------
+
+    #[test]
+    fn check_sentence_sandhi33_front_rising_is_not_flagged() {
+        // 「你好」：你合成升形（变调后实际读法 ní-hǎo）→ 不标（v0 会误标）
+        let audio = join_syllables(&[
+            synth_chirp(140.0, 280.0, 0.4),    // 你：升（变调后的二声形）
+            synth_dipping(260.0, 170.0, 0.45), // 好：降升（句末全三声）
+        ]);
+        assert!(
+            check_sentence("你好", &audio, SR).is_empty(),
+            "3+3 前字读升形属正常变调，不应标记"
+        );
+    }
+
+    #[test]
+    fn check_sentence_three_third_chain_all_sandhi_not_flagged() {
+        // 「我也想」三连三声 → 实际读 2+2+3：前两字升形都豁免
+        let audio = join_syllables(&[
+            synth_chirp(150.0, 290.0, 0.35),
+            synth_chirp(150.0, 290.0, 0.35),
+            synth_dipping(280.0, 180.0, 0.45),
+        ]);
+        assert!(check_sentence("我也想", &audio, SR).is_empty());
+    }
+
+    #[test]
+    fn check_sentence_half_third_low_flat_is_not_flagged() {
+        // 「马妈」：马（三声）在非三声前读半三（低平）→ 不标（v0 会误标）
+        let audio = join_syllables(&[
+            synth_chirp(160.0, 160.0, 0.4), // 马：低平（半三）
+            synth_chirp(280.0, 280.0, 0.4), // 妈：高平
+        ]);
+        assert!(
+            check_sentence("马妈", &audio, SR).is_empty(),
+            "3+非3 前字低平（半三）属正常变调，不应标记"
+        );
+    }
+
+    #[test]
+    fn check_sentence_half_third_flat_without_baseline_still_exempt() {
+        // 浊音帧不足 30（无基线）：半三低平豁免依然生效（放宽不依赖基线），
+        // 其余平调判定退回 v0 绝对形状分类
+        let audio = join_syllables(&[
+            synth_chirp(170.0, 170.0, 0.13),
+            synth_chirp(300.0, 300.0, 0.13),
+        ]);
+        assert!(check_sentence("马妈", &audio, SR).is_empty());
+    }
+
+    #[test]
+    fn check_sentence_tone1_high_flat_in_low_voice_stays_tone1() {
+        // 低音域说话人（整句 105–210Hz）：真实一声高平在「其音域」顶部 → 仍判
+        // 一声不标。用绝对 Hz 定高平会把 210Hz 误判为低——归一化必须相对音域
+        let audio = join_syllables(&[
+            synth_chirp(150.0, 105.0, 0.35), // 骂：降（低音域）
+            synth_chirp(210.0, 210.0, 0.35), // 妈：高平（该说话人音域顶部）
+            synth_chirp(150.0, 105.0, 0.35), // 骂：降
+        ]);
+        assert!(
+            check_sentence("骂妈骂", &audio, SR).is_empty(),
+            "低音域说话人的一声高平不应被误判"
+        );
+    }
+
+    #[test]
+    fn check_sentence_half3_low_flat_in_high_voice_stays_third() {
+        // 高音域说话人（整句 320–520Hz）：三声半三的绝对 F0 不低（320Hz），
+        // 但相对其音域在底部 → 仍判三声不标
+        let audio = join_syllables(&[
+            synth_chirp(400.0, 400.0, 0.35), // 妈：高平
+            synth_chirp(240.0, 240.0, 0.35), // 马：低平（半三，高音域说话人的音域底部）
+            synth_chirp(400.0, 300.0, 0.35), // 骂：降
+        ]);
+        assert!(
+            check_sentence("妈马骂", &audio, SR).is_empty(),
+            "高音域说话人的半三低平不应被误判"
+        );
+    }
+
+    #[test]
+    fn check_sentence_does_not_flag_natural_declination() {
+        // 四个一声整体缓降（句尾自然降音）：句尾变低的一声不因音域百分位被标
+        let audio = join_syllables(&[
+            synth_chirp(300.0, 300.0, 0.3),
+            synth_chirp(280.0, 280.0, 0.3),
+            synth_chirp(260.0, 260.0, 0.3),
+            synth_chirp(240.0, 240.0, 0.3),
+        ]);
+        assert!(
+            check_sentence("妈妈妈妈", &audio, SR).is_empty(),
+            "句尾自然降音不应触发一声低平标记"
+        );
+    }
+
+    // --- v1 端到端（合成音节：规则不吞真偏差） ---------------------------------
+
+    #[test]
+    fn check_sentence_sandhi_contexts_do_not_swallow_real_errors() {
+        // 3+3 前字读成降调：规则只豁免升/降升，真偏差仍标 + note 说明规则
+        let audio = join_syllables(&[
+            synth_chirp(300.0, 160.0, 0.4),  // 你：降（真偏差）
+            synth_dipping(260.0, 170.0, 0.45),
+        ]);
+        let flags = check_sentence("你好", &audio, SR);
+        assert_eq!(flags.len(), 1, "3+3 前字降调是真偏差：{flags:?}");
+        assert_eq!(flags[0].char, "你");
+        assert_eq!((flags[0].expected_tone, flags[0].detected_shape), (3, 4));
+        assert!(flags[0].note.as_deref().unwrap().contains("三声连读"));
+
+        // 半三语境读成升调：仍标 + note
+        let audio = join_syllables(&[
+            synth_chirp(160.0, 320.0, 0.4), // 马：升（真偏差）
+            synth_chirp(280.0, 280.0, 0.4), // 妈：高平
+        ]);
+        let flags = check_sentence("马妈", &audio, SR);
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].detected_shape, 2);
+        assert!(flags[0].note.as_deref().unwrap().contains("半三"));
+
+        // 半三读成高平（相对音域顶部）：仍标（低平豁免不得放过高平）
+        let audio = join_syllables(&[
+            synth_chirp(360.0, 360.0, 0.35),
+            synth_chirp(400.0, 400.0, 0.35), // 马：高平（相对音域顶部 → 真偏差）
+            synth_chirp(340.0, 260.0, 0.35),
+        ]);
+        let flags = check_sentence("妈马骂", &audio, SR);
+        assert_eq!(flags.len(), 1, "高平的半三是真偏差：{flags:?}");
+        assert!(flags[0].note.as_deref().unwrap().contains("半三"));
+    }
+
+    #[test]
+    fn check_sentence_flags_tone1_read_at_register_bottom() {
+        // 一声读成音域底部的低平（妈 140Hz vs 其余 260–320Hz）→ 标 + note；
+        // v1 归一化新增的真偏差检出（v0 只看形状，一声平调一律放过）
+        let audio = join_syllables(&[
+            synth_chirp(140.0, 140.0, 0.4), // 妈：低平（音域底部）
+            synth_chirp(320.0, 260.0, 0.4), // 骂：降
+            synth_chirp(320.0, 260.0, 0.4), // 骂：降
+        ]);
+        let flags = check_sentence("妈骂骂", &audio, SR);
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].char, "妈");
+        assert_eq!(flags[0].detected_shape, 1);
+        assert!(flags[0].note.is_some());
+    }
+
     // --- 音节数门控边界 -------------------------------------------------------
 
     #[test]
@@ -973,6 +1473,7 @@ mod tests {
             char: "妈".into(),
             expected_tone: 1,
             detected_shape: 4,
+            note: None,
         };
         let v = serde_json::to_value(&flag).unwrap();
         assert_eq!(v["sentenceId"], 3);
@@ -982,6 +1483,32 @@ mod tests {
         assert_eq!(v["detectedShape"], 4);
         let back: ToneFlag = serde_json::from_value(v).unwrap();
         assert_eq!(back, flag);
+    }
+
+    #[test]
+    fn tone_flag_note_round_trips_and_legacy_json_stays_compatible() {
+        // 带 note：round-trip 保留；序列化产生 note 键
+        let flag = ToneFlag {
+            sentence_id: 3,
+            char_index: 0,
+            char: "你".into(),
+            expected_tone: 3,
+            detected_shape: 4,
+            note: Some("三声连读，前字应读作二声（升）".into()),
+        };
+        let v = serde_json::to_value(&flag).unwrap();
+        assert_eq!(v["note"], "三声连读，前字应读作二声（升）");
+        let back: ToneFlag = serde_json::from_value(v).unwrap();
+        assert_eq!(back, flag);
+        // 无 note：序列化不产生 note 键（与 v0 格式字节级一致）
+        let plain = ToneFlag { note: None, ..flag };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("note").is_none(), "无说明时不应写出 note 键");
+        // v0 旧记录 JSON（无 note 字段）反序列化 → None
+        let legacy = r#"{"sentenceId":1,"charIndex":0,"char":"妈","expectedTone":1,"detectedShape":4}"#;
+        let back: ToneFlag = serde_json::from_str(legacy).unwrap();
+        assert_eq!(back.note, None);
+        assert_eq!(back.char, "妈");
     }
 
     #[test]
@@ -1007,5 +1534,11 @@ mod tests {
         assert_eq!(MIN_VOICED_FRAMES, 4);
         assert!((FLAG_CONFIDENCE_MIN - 0.6).abs() < 1e-9);
         assert!((MIN_ANALYZED_RATIO - 0.6).abs() < 1e-9);
+        // v1：基线注册与音域判定阈值（防误报关键参数，防无意漂移）
+        assert_eq!(MIN_BASELINE_FRAMES, 30);
+        assert!((MIN_RANGE_SPAN_ST - 4.0).abs() < 1e-9);
+        assert!((REGISTER_LOW - 0.40).abs() < 1e-9);
+        assert!((REGISTER_HIGH - 0.60).abs() < 1e-9);
+        assert!((REGISTER_BOTTOM - 0.10).abs() < 1e-9);
     }
 }

@@ -937,7 +937,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // --- 声调标记入档（v0）--------------------------------------------------
+    // --- 声调标记入档（v0 起有；v1 增加 note）--------------------------------
 
     #[test]
     fn tone_flags_roundtrip_into_record_snapshot() {
@@ -949,11 +949,14 @@ mod tests {
             char: "妈".into(),
             expected_tone: 1,
             detected_shape: 4,
+            note: Some("一声应保持高平（音域上半区），实测位于音域底部".into()),
         }];
         save_record(&dir, &record).unwrap();
         let back = read_record(&dir, "2026-09-04-100000").unwrap();
         assert_eq!(back.snapshot.tone_flags, record.snapshot.tone_flags);
         assert_eq!(back.snapshot.tone_flags[0].sentence_id, 2);
+        // note 随快照 round-trip 保留（v1 规则说明不丢）
+        assert_eq!(back.snapshot.tone_flags[0].note, record.snapshot.tone_flags[0].note);
         // 无标记快照序列化为空数组（与会话快照同口径：可区分「已分析无发现」
         // 与「未分析」，由前端按 undefined/[] 判空态）
         let v = serde_json::to_value(&sample_record("2026-09-04-110000", 10, 1.0)).unwrap();

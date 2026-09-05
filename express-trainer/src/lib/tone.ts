@@ -31,6 +31,15 @@ export function toneFlagText(flag: ToneFlag): string {
   return `第 ${flag.sentenceId} 句「${flag.char}」应为${tone}声（听感偏${shape}）`;
 }
 
+/**
+ * 标记附注（note）展示文案：后端规则说明原样透传；缺失/空白 → null（不渲染）。
+ * 旧记录与普通偏差没有 note 字段，面板据此省略附注小字。
+ */
+export function toneNoteText(flag: ToneFlag): string | null {
+  const note = typeof flag.note === "string" ? flag.note.trim() : "";
+  return note.length > 0 ? note : null;
+}
+
 /** 声调提示面板状态（空态三分类 + 有发现） */
 export type TonePanelState = "hidden" | "noAudio" | "analyzing" | "clean" | "flags";
 

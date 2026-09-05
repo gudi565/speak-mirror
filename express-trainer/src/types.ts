@@ -59,6 +59,9 @@ export interface ToneFlag {
   expectedTone: number;
   /** 检测到的形状（1 高平 / 2 升 / 3 降升 / 4 降 / 5 短轻） */
   detectedShape: number;
+  /** 规则说明（v1）：变调/音域规则语境下的真偏差附说明（如
+   *  「三声连读，前字应读作二声（升）」）；普通偏差与旧记录缺省 */
+  note?: string | null;
 }
 
 export interface SessionSnapshot {

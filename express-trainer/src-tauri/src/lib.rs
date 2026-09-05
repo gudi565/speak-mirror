@@ -340,11 +340,12 @@ fn get_snapshot(state: State<AppState>) -> SessionSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// 声调偏差检查（v0）：会话停止后的异步后处理，不碰实时链路
+// 声调偏差检查（v1）：会话停止后的异步后处理，不碰实时链路
 // ---------------------------------------------------------------------------
 
 /// 停止后触发声调分析（若条件满足）：读录音 wav → 逐句（startMs/endMs 切片）
-/// 跑 tone::check_sentence → 结果写入 AppState.tone_flags 并 emit `tone_update`
+/// 跑 tone::check_sentence（含变调规则豁免与句内音域归一）→ 结果写入
+/// AppState.tone_flags 并 emit `tone_update`
 /// `{ flags }`（空数组 = 已分析无发现；不发射 = 未开启/无录音）。
 /// 返回值恒为空（分析在后台异步完成，stop_session 的快照不带新结果）；
 /// 世代校验：分析完成时新会话已启动则丢弃结果，不打扰新会话的界面。
@@ -612,6 +613,7 @@ mod tests {
                 char: "妈".into(),
                 expected_tone: 1,
                 detected_shape: 4,
+                note: None,
             }])),
             downloading: AtomicBool::new(false),
         };

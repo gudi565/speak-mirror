@@ -628,18 +628,22 @@ pub fn build_local_report(
     if !snapshot.tone_flags.is_empty() {
         md.push_str("## 声调\n\n");
         for f in snapshot.tone_flags.iter().take(8) {
+            // 有规则说明（变调/音域语境的真偏差）时并入括号内，与前端面板同口径
+            let mut inner = format!("听感偏{}", crate::tone::shape_label_cn(f.detected_shape));
+            if let Some(note) = &f.note {
+                inner.push_str(&format!("；{note}"));
+            }
             md.push_str(&format!(
-                "- 第 {} 句「{}」应为{}声（听感偏{}）\n",
+                "- 第 {} 句「{}」应为{}声（{inner}）\n",
                 f.sentence_id,
                 f.char,
-                crate::tone::tone_number_cn(f.expected_tone),
-                crate::tone::shape_label_cn(f.detected_shape)
+                crate::tone::tone_number_cn(f.expected_tone)
             ));
         }
         if snapshot.tone_flags.len() > 8 {
             md.push_str(&format!("\n（其余 {} 处略）\n", snapshot.tone_flags.len() - 8));
         }
-        md.push_str("\n（基于基音轮廓与词典声调的离线启发判断，仅供参考；可在总结页点对应句回放对照。）\n\n");
+        md.push_str("\n（基于基音轮廓、词典声调与变调规则的离线启发判断，仅供参考；可在总结页点对应句回放对照。）\n\n");
     }
 
     // 口头禅
@@ -1276,6 +1280,7 @@ mod tests {
                 char: "妈".into(),
                 expected_tone: 1,
                 detected_shape: 4,
+                note: None,
             },
             crate::tone::ToneFlag {
                 sentence_id: 2,
@@ -1283,6 +1288,7 @@ mod tests {
                 char: "骂".into(),
                 expected_tone: 4,
                 detected_shape: 2,
+                note: None,
             },
         ];
         apply_tone_stats(&mut stats, &flags);
@@ -1486,6 +1492,7 @@ mod tests {
                 char: "骂".into(),
                 expected_tone: 4,
                 detected_shape: 2,
+                note: None,
             },
             crate::tone::ToneFlag {
                 sentence_id: 1,
@@ -1493,12 +1500,14 @@ mod tests {
                 char: "马".into(),
                 expected_tone: 3,
                 detected_shape: 1,
+                // v1：变调/音域规则语境的真偏差附说明，本地报告同口径展示
+                note: Some("三声在非三声前读半三（低平）或降升".into()),
             },
         ];
         let md = build_local_report("free", None, &sentences, &snapshot, &[], None, None, &[], None);
         assert!(md.contains("## 声调"));
         assert!(md.contains("第 1 句「骂」应为四声（听感偏升调）"));
-        assert!(md.contains("第 1 句「马」应为三声（听感偏高平）"));
+        assert!(md.contains("第 1 句「马」应为三声（听感偏高平；三声在非三声前读半三（低平）或降升）"));
         // 无标记的普通报告不含声调小节
         let plain =
             build_local_report("free", None, &sentences, &engine.snapshot(), &[], None, None, &[], None);

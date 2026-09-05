@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SHAPE_CN, TONE_CN, toneFlagText, tonePanelState } from "./tone";
+import { SHAPE_CN, TONE_CN, toneFlagText, toneNoteText, tonePanelState } from "./tone";
 import type { ToneFlag } from "../types";
 
 function flag(overrides: Partial<ToneFlag> = {}): ToneFlag {
@@ -36,6 +36,29 @@ describe("toneFlagText", () => {
   it("label tables cover exactly 1-5", () => {
     expect(Object.keys(TONE_CN).sort()).toEqual(["1", "2", "3", "4", "5"]);
     expect(Object.keys(SHAPE_CN).sort()).toEqual(["1", "2", "3", "4", "5"]);
+  });
+});
+
+describe("toneNoteText", () => {
+  it("passes backend rule notes through unchanged", () => {
+    expect(toneNoteText(flag({ note: "三声连读，前字应读作二声（升）" }))).toBe(
+      "三声连读，前字应读作二声（升）",
+    );
+    expect(toneNoteText(flag({ note: "一声应保持高平（音域上半区），实测位于音域底部" }))).toBe(
+      "一声应保持高平（音域上半区），实测位于音域底部",
+    );
+  });
+
+  it("returns null for missing note (legacy records and plain deviations)", () => {
+    const { note: _note, ...legacyFlag } = flag();
+    expect(toneNoteText(legacyFlag as ToneFlag)).toBeNull();
+  });
+
+  it("returns null for null/undefined/blank notes", () => {
+    expect(toneNoteText(flag({ note: undefined }))).toBeNull();
+    expect(toneNoteText(flag({ note: null }))).toBeNull();
+    expect(toneNoteText(flag({ note: "   " }))).toBeNull();
+    expect(toneNoteText(flag({ note: "" }))).toBeNull();
   });
 });
 
