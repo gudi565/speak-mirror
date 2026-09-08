@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # 手动触发（支持从标签触发发布流水线；API 推送标签不产生 push 事件时的兜底）
+  workflow_dispatch:
 
 jobs:
   test:

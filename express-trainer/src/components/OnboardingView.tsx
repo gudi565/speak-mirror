@@ -315,6 +315,7 @@ export function OnboardingView({ settings, onUpdate, onSave, onFinish }: Props) 
             <p className="mt-1 text-sm text-neutral-500">
               不配置也能完整使用：实时字幕、词库反馈、声音仪表、本地统计报告全部离线可用。
               配置后可生成逐句改写的 AI 完整报告与练习中周期快评；API Key 仅保存在本机。
+              跳过则只有本地统计报告，AI 分析全部不可用。
             </p>
             <div className="mt-5 rounded-lg border border-neutral-200 bg-white p-4">
               <AiBackendFields settings={settings} onUpdate={onUpdate} onSave={onSave} />

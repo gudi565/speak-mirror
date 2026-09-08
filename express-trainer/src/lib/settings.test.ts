@@ -5,6 +5,8 @@ import {
   hasRemoteBackend,
   normalizeSettings,
   settingsForStore,
+  shouldShowAiNudge,
+  smartLayerJustEnabled,
 } from "./settings";
 import { FILE_SPEED_MAX, speedLabel } from "../types";
 
@@ -130,6 +132,68 @@ describe("hasRemoteBackend", () => {
     expect(hasRemoteBackend(DEFAULT_SETTINGS)).toBe(false);
     expect(hasRemoteBackend({ ...DEFAULT_SETTINGS, apiKey: "sk-x" })).toBe(true);
     expect(hasRemoteBackend({ ...DEFAULT_SETTINGS, aiBackend: "ollama" })).toBe(true);
+  });
+});
+
+describe("aiNudgeDismissed + shouldShowAiNudge（AI 智能层激活横幅）", () => {
+  it("defaults false for legacy settings and validates type", () => {
+    // 旧设置无该字段 → false（主界面显示横幅），与 Rust serde default 一致
+    expect(normalizeSettings({ aiBackend: "openai", apiKey: "k" }).aiNudgeDismissed).toBe(false);
+    expect(DEFAULT_SETTINGS.aiNudgeDismissed).toBe(false);
+    expect(normalizeSettings(undefined).aiNudgeDismissed).toBe(false);
+    // 非布尔值回落 false；合法值保留
+    expect(normalizeSettings({ aiNudgeDismissed: "yes" } as never).aiNudgeDismissed).toBe(false);
+    expect(normalizeSettings({ aiNudgeDismissed: 1 } as never).aiNudgeDismissed).toBe(false);
+    expect(normalizeSettings({ aiNudgeDismissed: true }).aiNudgeDismissed).toBe(true);
+  });
+
+  it("shows the banner only when settings loaded, no remote, and not dismissed", () => {
+    // 设置未加载 → 不显示（避免首帧闪烁）
+    expect(shouldShowAiNudge(null)).toBe(false);
+    expect(shouldShowAiNudge(undefined)).toBe(false);
+    // 默认（无 Key）→ 显示
+    expect(shouldShowAiNudge(DEFAULT_SETTINGS)).toBe(true);
+    // 配置远端后条件不再成立 → 消失
+    expect(shouldShowAiNudge({ ...DEFAULT_SETTINGS, apiKey: "sk-x" })).toBe(false);
+    expect(shouldShowAiNudge({ ...DEFAULT_SETTINGS, aiBackend: "ollama" })).toBe(false);
+    // 「暂不提醒」→ 不再显示
+    expect(shouldShowAiNudge({ ...DEFAULT_SETTINGS, aiNudgeDismissed: true })).toBe(false);
+    // 已配置远端时 dismissed 不影响结果（横幅本就不显示）
+    expect(
+      shouldShowAiNudge({ ...DEFAULT_SETTINGS, apiKey: "k", aiNudgeDismissed: false }),
+    ).toBe(false);
+  });
+});
+
+describe("smartLayerJustEnabled（设置页一次性绿色提示的判定）", () => {
+  it("is true only when saving crosses from no-remote to remote", () => {
+    // 无 → 有（填了 Key / 切到 Ollama）
+    expect(
+      smartLayerJustEnabled(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, apiKey: "sk-x" }),
+    ).toBe(true);
+    expect(
+      smartLayerJustEnabled(DEFAULT_SETTINGS, { ...DEFAULT_SETTINGS, aiBackend: "ollama" }),
+    ).toBe(true);
+  });
+
+  it("is false when remote existed before or after save stays remote-less", () => {
+    // 有 → 有（换 Key / 换后端）
+    expect(
+      smartLayerJustEnabled(
+        { ...DEFAULT_SETTINGS, apiKey: "a" },
+        { ...DEFAULT_SETTINGS, apiKey: "b" },
+      ),
+    ).toBe(false);
+    // 无 → 无（Ollama 切回 DeepSeek 未填 Key）
+    expect(
+      smartLayerJustEnabled({ ...DEFAULT_SETTINGS, aiBackend: "ollama" }, DEFAULT_SETTINGS),
+    ).toBe(false);
+    // 无 → 无（什么都不改）
+    expect(smartLayerJustEnabled(DEFAULT_SETTINGS, DEFAULT_SETTINGS)).toBe(false);
+    // 有 → 无（清掉 Key）：不算「开启」
+    expect(smartLayerJustEnabled({ ...DEFAULT_SETTINGS, apiKey: "a" }, DEFAULT_SETTINGS)).toBe(
+      false,
+    );
   });
 });
 

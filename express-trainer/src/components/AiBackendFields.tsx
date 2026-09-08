@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BACKEND_LABELS, BACKEND_PRESETS } from "../lib/settings";
 import type { AiBackend, Settings, TestConnectionResult } from "../types";
@@ -8,6 +8,8 @@ interface Props {
   onUpdate: (patch: Partial<Settings>) => void;
   /** 「测试连接」前先持久化当前表单（Rust 侧从 store 读配置）；返回值含 Key 存储结果 */
   onSave: (next: Settings) => Promise<unknown>;
+  /** 挂载后聚焦后端下拉（「1 分钟开启」横幅入口） */
+  autoFocus?: boolean;
 }
 
 const BACKENDS: AiBackend[] = ["deepseek", "openai", "groq", "ollama", "custom"];
@@ -16,9 +18,14 @@ const BACKENDS: AiBackend[] = ["deepseek", "openai", "groq", "ollama", "custom"]
  * AI 后端配置块（后端选择 / API Key / Base URL / 模型名 / 测试连接）。
  * SettingsView 与首启向导（OnboardingView 第 2 步）共用。
  */
-export function AiBackendFields({ settings, onUpdate, onSave }: Props) {
+export function AiBackendFields({ settings, onUpdate, onSave, autoFocus }: Props) {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
+  const selectRef = useRef<HTMLSelectElement>(null);
+
+  useEffect(() => {
+    if (autoFocus) selectRef.current?.focus();
+  }, [autoFocus]);
 
   const selectBackend = (backend: AiBackend) => {
     setTestResult(null);
@@ -54,6 +61,7 @@ export function AiBackendFields({ settings, onUpdate, onSave }: Props) {
       <div>
         <label className="mb-1 block text-sm font-medium text-neutral-700">AI 后端</label>
         <select
+          ref={selectRef}
           value={settings.aiBackend}
           onChange={(e) => selectBackend(e.target.value as AiBackend)}
           className="w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm"

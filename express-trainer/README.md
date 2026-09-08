@@ -25,7 +25,7 @@ Just speak English: recognition, real-time rules (English fillers / vocabulary p
 每个版本提供两种安装包：
 
 - **全量离线包** `SpeakMirror-full-x64-setup.exe`（约 400MB）：**内置识别模型，安装即用、全程无需联网**——推荐网络一般的用户
-- **在线包** `SpeakMirror_0.2.8_x64-setup.exe`（约 9MB）：安装快，首次启动自动下载模型（约 460MB）
+- **在线包** `SpeakMirror_0.2.9_x64-setup.exe`（约 9MB）：安装快，首次启动自动下载模型（约 460MB）
 
 双击安装（安装语言可选简体中文 / English，默认安装到当前用户目录，无需管理员权限）；全量包安装后直接开始练习，在线包按首启引导提示完成即可。
 
@@ -47,7 +47,7 @@ npm install
 npm run tauri build
 ```
 
-构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.8_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
+构建产物：`src-tauri\target\release\bundle\nsis\SpeakMirror_0.2.9_x64-setup.exe`（exe 本体在 `src-tauri\target\release\`）。
 
 开发调试：`npm run tauri dev`。测试：`cd src-tauri && cargo test`（Rust 规则引擎）与 `npm test`（前端）。
 
@@ -117,4 +117,4 @@ powershell -ExecutionPolicy Bypass -File scripts\download-models.ps1
 
 ---
 
-SpeakMirror v0.2.8 · 免责：本地处理语音，API Key 仅存本地。
+SpeakMirror v0.2.9 · 免责：本地处理语音，API Key 仅存本地。

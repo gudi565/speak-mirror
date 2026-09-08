@@ -536,6 +536,7 @@ pub fn run() {
             interview::generate_interview_questions,
             report::get_transcript,
             report::generate_report,
+            report::followup_question,
             report::test_connection,
             export::save_text_file,
             export::export_obsidian,

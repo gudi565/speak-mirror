@@ -44,6 +44,7 @@ export const DEFAULT_SETTINGS: Settings = {
   enhanceAudio: true,
   showLivePreview: true,
   toneCheck: true,
+  aiNudgeDismissed: false,
 };
 
 /** 与 Rust 侧 normalized() 一致：非法取值回落默认 */
@@ -107,12 +108,31 @@ export function normalizeSettings(raw: unknown): Settings {
   if (typeof s.showLivePreview !== "boolean") s.showLivePreview = true;
   // 声调偏差检查（默认 true，与 Rust default_tone_check 一致）
   if (typeof s.toneCheck !== "boolean") s.toneCheck = true;
+  // AI 智能层激活横幅「暂不提醒」（默认 false，与 Rust serde default 一致）
+  if (typeof s.aiNudgeDismissed !== "boolean") s.aiNudgeDismissed = false;
   return s;
 }
 
 /** Ollama 本地服务无需 Key */
 export function hasRemoteBackend(s: Settings): boolean {
   return s.aiBackend === "ollama" || s.apiKey.trim().length > 0;
+}
+
+/**
+ * 主界面「AI 智能层未开启」横幅是否显示（纯函数可测）：
+ * 设置已加载 且 未配置远端后端 且 未点过「暂不提醒」。
+ * 配置 Key（或切到 Ollama）后条件自然不再成立，横幅自动消失。
+ */
+export function shouldShowAiNudge(settings: Settings | null | undefined): boolean {
+  return settings != null && !settings.aiNudgeDismissed && !hasRemoteBackend(settings);
+}
+
+/**
+ * 设置保存后智能层是否「从无到有」开启（设置页一次性绿色提示的判定，纯函数可测）：
+ * 保存前无远端、保存后有远端（填了 Key / 切到 Ollama）。
+ */
+export function smartLayerJustEnabled(before: Settings, after: Settings): boolean {
+  return !hasRemoteBackend(before) && hasRemoteBackend(after);
 }
 
 const STORE_FILE = "settings.json";

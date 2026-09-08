@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { hasRemoteBackend } from "./lib/settings";
+import { hasRemoteBackend, shouldShowAiNudge } from "./lib/settings";
 import { fmtDuration } from "./lib/history";
 import { SCENARIOS, scenarioMeta } from "./lib/scenarios";
 import {
@@ -68,6 +68,8 @@ export default function App() {
 
   const [view, setView] = useState<View>("live");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 打开设置时聚焦后端下拉（「1 分钟开启」横幅入口；关闭设置页后复位）
+  const [settingsFocusBackend, setSettingsFocusBackend] = useState(false);
   // 历史落盘失败提示（Rust 只发一次 history_error；主流程不受影响）
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [scenario, setScenario] = useState<Scenario>("free");
@@ -506,6 +508,35 @@ export default function App() {
           </button>
         </div>
       </header>
+      {/* 智能层激活横幅：未配置远端后端（AI 报告 / 快评 / AI 出题全不可用）且未「暂不提醒」。
+          常驻琥珀色；配置 Key 或切到 Ollama 后条件不再成立，自动消失 */}
+      {view === "live" && !running && !interview && shouldShowAiNudge(settings) && (
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-amber-200 bg-amber-50 px-6 py-2.5 text-sm text-amber-800">
+          <span className="min-w-0">
+            AI 智能层未开启——逐句分析报告、练习中 AI 点评、AI 出题面试都不可用。
+          </span>
+          <span className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={() => {
+                setSettingsFocusBackend(true);
+                setSettingsOpen(true);
+              }}
+              className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700"
+            >
+              1 分钟开启
+            </button>
+            <button
+              onClick={() => {
+                if (settings) void persist({ ...settings, aiNudgeDismissed: true });
+              }}
+              title="不再显示此横幅（配置 AI 后端后横幅也会自动消失）"
+              className="rounded-lg border border-amber-300 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-100"
+            >
+              暂不提醒
+            </button>
+          </span>
+        </div>
+      )}
       {/* 面试答题横幅：进入 live 界面回答当前题时显示题目 */}
       {view === "live" && interview && (
         <div className="flex items-center gap-3 border-b border-indigo-100 bg-indigo-50 px-6 py-2 text-sm text-indigo-900">
@@ -641,6 +672,7 @@ export default function App() {
             mode={interview ? "full" : reportMode}
             onRetry={report.retry}
             onRestart={interview ? handleExitInterview : handleStart}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
         </main>
       )}
@@ -681,7 +713,11 @@ export default function App() {
           settings={settings}
           onUpdate={update}
           onSave={persistSettings}
-          onClose={() => setSettingsOpen(false)}
+          focusBackend={settingsFocusBackend}
+          onClose={() => {
+            setSettingsOpen(false);
+            setSettingsFocusBackend(false);
+          }}
         />
       )}
     </div>

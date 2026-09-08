@@ -4,6 +4,8 @@ import remarkGfm from "remark-gfm";
 import { invoke } from "@tauri-apps/api/core";
 import { scenarioLabel } from "../lib/scenarios";
 import { layoutSkeleton, reportModeLabel, shouldUseSkeleton } from "../lib/report";
+import { followupSuggestions, isNoBackendError } from "../lib/followup";
+import { useFollowup } from "../hooks/useFollowup";
 import type { ReportMode, ReportStatus, SaveOutcome, Scenario } from "../types";
 
 interface Props {
@@ -17,6 +19,8 @@ interface Props {
   mode: ReportMode;
   onRetry: () => void;
   onRestart: () => void;
+  /** 追问遇「未配置 AI」错误时打开设置页（配置引导入口） */
+  onOpenSettings: () => void;
 }
 
 function today(): string {
@@ -83,6 +87,114 @@ function SkeletonView({ text, mode }: { text: string; mode: ReportMode }) {
   );
 }
 
+/**
+ * 报告追问分区（报告完成后显示在正文下方）：输入框 + 场景建议 chips + 问答对列表。
+ * 每轮追问独立请求、带完整报告上下文（历史追问不重复发送）；流式防并发；
+ * 失败可重试；「未配置 AI」类错误换配置引导按钮。本地降级报告同样可追问
+ * （同样走远端——报告只是上下文，不要求报告本身由 AI 生成）。
+ * 报告重新生成（status 离开 done）时本分区整体卸载，问答状态随之清空。
+ */
+function FollowupSection({
+  scenario,
+  reportText,
+  onOpenSettings,
+}: {
+  scenario: Scenario;
+  reportText: string;
+  onOpenSettings: () => void;
+}) {
+  const { items, busy, ask, retry } = useFollowup();
+  const [input, setInput] = useState("");
+
+  const send = () => {
+    const q = input.trim();
+    if (!q || busy) return;
+    setInput("");
+    void ask(q, { scenario, reportText });
+  };
+
+  return (
+    <section className="mt-8 border-t border-neutral-200 pt-5">
+      <h3 className="text-sm font-semibold text-neutral-800">追问与解答</h3>
+      <p className="mt-1 text-xs text-neutral-400">
+        就这份报告继续向 AI 教练追问；每轮都会带上完整报告上下文
+      </p>
+
+      {items.map((item, i) => (
+        <div key={i} className="mt-4">
+          <div className="rounded-lg bg-neutral-100 px-3 py-2 text-sm text-neutral-800">
+            <span className="mr-1 font-medium text-neutral-500">问</span>
+            {item.question}
+          </div>
+          {item.error != null ? (
+            <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm">
+              <div className="break-all text-red-600">{item.error}</div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  onClick={() => void retry(i)}
+                  disabled={busy}
+                  className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+                >
+                  重试
+                </button>
+                {isNoBackendError(item.error) && (
+                  <button
+                    onClick={onOpenSettings}
+                    className="rounded-lg border border-red-300 px-3 py-1.5 text-xs text-red-700 hover:bg-red-100"
+                  >
+                    去设置开启 AI（配置 API Key）
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : item.answer ? (
+            <div className="report-md mt-2">
+              <Markdown remarkPlugins={[remarkGfm]}>{item.answer}</Markdown>
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-neutral-400">解答中…</p>
+          )}
+        </div>
+      ))}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {followupSuggestions(scenario).map((s) => (
+          <button
+            key={s}
+            onClick={() => setInput(s)}
+            disabled={busy}
+            title="点击填入输入框"
+            className="rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-100 disabled:opacity-50"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-3 flex gap-2 pb-2">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            // 中文输入法组词中的 Enter 不发送（isComposing）
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) send();
+          }}
+          disabled={busy}
+          placeholder="就这份报告继续追问…（Enter 发送）"
+          className="min-w-0 flex-1 rounded-lg border border-neutral-300 px-3 py-2 text-sm disabled:opacity-50"
+        />
+        <button
+          onClick={send}
+          disabled={busy || !input.trim()}
+          className="shrink-0 rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-700 disabled:opacity-50"
+        >
+          {busy ? "解答中…" : "发送"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export function ReportView({
   status,
   text,
@@ -93,6 +205,7 @@ export function ReportView({
   mode,
   onRetry,
   onRestart,
+  onOpenSettings,
 }: Props) {
   const [hint, setHint] = useState<string | null>(null);
   const busy = status === "streaming";
@@ -194,6 +307,9 @@ export function ReportView({
               <SkeletonView text={text} mode={mode} />
             ) : (
               <Markdown remarkPlugins={[remarkGfm]}>{text || (busy ? "正在连接模型…" : "")}</Markdown>
+            )}
+            {status === "done" && (
+              <FollowupSection scenario={scenario} reportText={text} onOpenSettings={onOpenSettings} />
             )}
           </article>
 

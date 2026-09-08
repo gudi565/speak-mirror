@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { hasRemoteBackend } from "../lib/settings";
+import { hasRemoteBackend, smartLayerJustEnabled } from "../lib/settings";
 import { SCENARIOS } from "../lib/scenarios";
 import { downloadFileLabel, formatBytes, progressPercent } from "../lib/onboarding";
 import { AiBackendFields } from "./AiBackendFields";
@@ -12,6 +12,8 @@ interface Props {
   onUpdate: (patch: Partial<Settings>) => void;
   onSave: (next: Settings) => Promise<{ secureKey: boolean; keyMessage: string | null } | null>;
   onClose: () => void;
+  /** 挂载后聚焦后端下拉（「1 分钟开启」横幅的入口） */
+  focusBackend?: boolean;
 }
 
 /** 规则开关键与中文标签（与 Rust rules::engine::ALL_RULES 一致） */
@@ -55,10 +57,16 @@ function ModelRow({ ok, label }: { ok: boolean; label: string }) {
   );
 }
 
-export function SettingsView({ settings, onUpdate, onSave, onClose }: Props) {
+export function SettingsView({ settings, onUpdate, onSave, onClose, focusBackend }: Props) {
   const [savedHint, setSavedHint] = useState(false);
   // API Key 降级明文时的提示（系统凭据管理器写入失败）
   const [keyWarning, setKeyWarning] = useState<string | null>(null);
+  // 智能层「从无到有」开启的一次性绿色提示（保存成功且基线为无远端时触发）
+  const [smartHint, setSmartHint] = useState(false);
+  // 打开设置页时的持久化基线（智能层开启判定的 before；保存后推进，重复保存不再提示）
+  const baselineRef = useRef<Settings>(settings);
+  // 「去开启」滚动的目标：AI 周期快评开关块
+  const checkinRef = useRef<HTMLDivElement>(null);
 
   // 词库候选（词库自生长）：独立于设置体，走 growth 命令
   const [candidates, setCandidates] = useState<LexiconCandidate[] | null>(null);
@@ -164,6 +172,13 @@ export function SettingsView({ settings, onUpdate, onSave, onClose }: Props) {
     setKeyWarning(outcome?.keyMessage ?? null);
     setSavedHint(true);
     setTimeout(() => setSavedHint(false), 1500);
+    // 智能层「从无到有」开启 → 一次性绿色提示（基线推进：同一会话内重复保存不再触发）
+    if (outcome && smartLayerJustEnabled(baselineRef.current, settings)) {
+      setSmartHint(true);
+    }
+    if (outcome) {
+      baselineRef.current = settings;
+    }
   };
 
   return (
@@ -180,8 +195,26 @@ export function SettingsView({ settings, onUpdate, onSave, onClose }: Props) {
         </div>
 
         <div className="space-y-5 px-6 py-5">
+          {/* 智能层开启提示：保存成功且从「无远端」变为「有远端」时的一次性引导 */}
+          {smartHint && (
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2.5 text-sm text-green-800">
+              <span className="min-w-0">
+                智能层已开启 ✓ 建议顺手打开「AI 周期快评」（练习中每{" "}
+                {settings.realtimeCheckinIntervalSec} 秒 AI 点评一次）
+              </span>
+              <button
+                onClick={() =>
+                  checkinRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+                }
+                className="shrink-0 rounded-lg bg-green-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-800"
+              >
+                去开启
+              </button>
+            </div>
+          )}
+
           {/* AI 后端（与首启向导共用配置块） */}
-          <AiBackendFields settings={settings} onUpdate={onUpdate} onSave={onSave} />
+          <AiBackendFields settings={settings} onUpdate={onUpdate} onSave={onSave} autoFocus={focusBackend} />
 
           <div>
             <label className="mb-1 block text-sm font-medium text-neutral-700">
@@ -572,7 +605,7 @@ export function SettingsView({ settings, onUpdate, onSave, onClose }: Props) {
           </div>
 
           {/* AI 周期快评 */}
-          <div className="rounded-lg border border-neutral-200 p-3">
+          <div ref={checkinRef} className="rounded-lg border border-neutral-200 p-3">
             <label className="flex items-center gap-2 text-sm font-medium text-neutral-700">
               <input
                 type="checkbox"

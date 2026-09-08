@@ -119,6 +119,11 @@ pub struct Settings {
     /// 推给前端「声调提示」面板。不联网、不上传录音
     #[serde(default = "default_tone_check")]
     pub tone_check: bool,
+    /// AI 智能层激活横幅已「暂不提醒」（true = 主界面不再显示横幅）：
+    /// 前端写 store、Rust 侧只读，保持两侧 Settings 结构一致；
+    /// 配置远端后端后横幅条件自然不再成立
+    #[serde(default)]
+    pub ai_nudge_dismissed: bool,
 }
 
 pub fn default_filler_high_threshold() -> f64 {
@@ -268,6 +273,7 @@ impl Default for Settings {
             enhance_audio: default_enhance_audio(),
             show_live_preview: default_show_live_preview(),
             tone_check: default_tone_check(),
+            ai_nudge_dismissed: false,
         }
     }
 }
@@ -703,5 +709,21 @@ mod tests {
         let v = serde_json::to_value(Settings { tone_check: false, ..Default::default() }).unwrap();
         assert_eq!(v["toneCheck"], false);
         assert!(!serde_json::from_value::<Settings>(v).unwrap().tone_check);
+    }
+
+    #[test]
+    fn ai_nudge_dismissed_defaults_false_and_serializes_camel() {
+        // 旧 settings.json 无该字段 → false（主界面显示「AI 智能层未开启」横幅）
+        let legacy = r#"{ "aiBackend": "openai", "apiKey": "k", "baseUrl": "", "modelName": "", "obsidianVaultPath": "", "scenario": "free" }"#;
+        let s: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(!s.ai_nudge_dismissed);
+        assert!(!Settings::default().ai_nudge_dismissed);
+        // 序列化 camelCase（与前端 store 键一致）+ round-trip 保留「暂不提醒」
+        let v =
+            serde_json::to_value(Settings { ai_nudge_dismissed: true, ..Default::default() })
+                .unwrap();
+        assert_eq!(v["aiNudgeDismissed"], true);
+        assert!(serde_json::from_value::<Settings>(v).unwrap().ai_nudge_dismissed);
+        // 非布尔值（异常数据）→ serde default false 兜底由前端 normalize 负责，Rust 侧仅约定布尔
     }
 }

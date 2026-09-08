@@ -161,6 +161,9 @@ export interface Settings {
   /** 声调偏差检查（默认开）：练习结束后对录音做纯本机的声调分析，
    *  疑似偏差在总结页「声调提示」面板列出；不上传录音 */
   toneCheck: boolean;
+  /** AI 智能层激活横幅已「暂不提醒」（true = 主界面不再显示横幅）；
+   *  配置远端后端后横幅条件自然不再成立 */
+  aiNudgeDismissed: boolean;
 }
 
 export interface FillerWords {

@@ -1,9 +1,15 @@
-//! 报告层：终稿逐字稿获取、AI 报告（OpenAI 兼容流式）、本地降级报告、连接测试。
+//! 报告层：终稿逐字稿获取、AI 报告（OpenAI 兼容流式）、本地降级报告、连接测试、报告追问。
 //!
 //! 事件契约（前端 useReport 监听）：
 //! - `report_chunk` `{ text }`   流式增量 Markdown 片段
 //! - `report_done`   `{ text }`  报告完成，text 为全文
 //! - `report_error`  `{ message }` 生成失败
+//!
+//! 报告追问（followup_question）复用同一远端调用与 SSE 流式，但走独立事件
+//! （复用 report_chunk 会把追问串进报告正文）：
+//! - `followup_chunk` `{ text }`   回答流式增量
+//! - `followup_done`  `{ text }`   回答完成，text 为全文
+//! - `followup_error` `{ message }` 追问失败（含未配置 Key 的明确中文错误）
 
 use crate::history::{self, PreviousSession};
 use crate::rules::engine::SessionSnapshot;
@@ -31,6 +37,9 @@ pub const QUICK_PROMPT: &str = include_str!("../prompts/quick.md");
 /// user JSON 的 scenario 字段注入一行说明），英文面试模板留后续。
 pub const EN_FREE_PROMPT: &str = include_str!("../prompts/en-free.md");
 pub const EN_QUICK_PROMPT: &str = include_str!("../prompts/en-quick.md");
+/// 报告追问 prompt（对话式补充解答，≤300 字）：输入 user JSON
+/// { question, report, scenario }，每轮都带完整报告上下文
+pub const FOLLOWUP_PROMPT: &str = include_str!("../prompts/followup.md");
 
 /// 报告支持的全部场景（与前端 types.ts Scenario 同步；settings.rs 的 SCENARIOS
 /// 仍为四项——mockInterview 只在模拟面试流程内部使用，不进普通场景下拉/设置）
@@ -44,6 +53,9 @@ pub const REPORT_MODES: &[&str] = &["full", "quick"];
 /// 快速模式的 max_tokens 上限：四节 ≤400 字 + 评分标记折 token 留足余量，
 /// 防模型偶尔超长拖慢出稿；截断风险极低（完整版不设上限，行为不变）
 pub const QUICK_MAX_TOKENS: u32 = 2_000;
+
+/// 追问回答的 max_tokens 上限：≤300 字分段回答 + 标点折 token 留余量
+pub const FOLLOWUP_MAX_TOKENS: u32 = 1_000;
 
 // ---------------------------------------------------------------------------
 // Prompt / 模式选择
@@ -279,6 +291,72 @@ pub fn build_request_body(
     }
     body
 }
+
+// ---------------------------------------------------------------------------
+// 报告追问（followup）：纯函数部分
+// ---------------------------------------------------------------------------
+
+/// 追问前置校验（纯函数可测）：空问题 / 未知场景 / 未配置远端 → 中文错误。
+/// 校验顺序：问题 → 场景 → 远端（错误信息对当前输入最准确）。
+pub fn validate_followup(question: &str, scenario: &str, can_remote: bool) -> Result<(), String> {
+    if question.trim().is_empty() {
+        return Err("追问内容为空，请输入问题后再发送".into());
+    }
+    if !SCENARIOS.contains(&scenario) {
+        return Err(format!("未知场景：{scenario}（支持 {}）", SCENARIOS.join(" / ")));
+    }
+    if !can_remote {
+        return Err(
+            "未配置 API Key（或 Ollama 本地服务），追问需要 AI 后端——请到「设置 → AI 后端」配置"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// 追问 user 消息 JSON（纯函数可测）：{ question, report, scenario(场景中文名) }。
+/// 每轮都带完整报告上下文；历史追问不重复发送（多轮各自独立请求）。
+pub fn build_followup_payload(question: &str, report: &str, scenario: &str) -> Value {
+    json!({
+        "question": question.trim(),
+        "report": report,
+        "scenario": scenario_label(scenario),
+    })
+}
+
+/// followup_done 事件 payload（与 report_done 同形：{ text }）
+pub fn followup_done_payload(text: &str) -> Value {
+    json!({ "text": text })
+}
+
+/// followup_error 事件 payload（与 report_error 同形：{ message }）
+pub fn followup_error_payload(message: &str) -> Value {
+    json!({ "message": message })
+}
+
+/// 一类远端流式调用的三件套事件名。报告与追问各用一套独立事件，
+/// 互不串流（追问复用 report_chunk 会把回答混进报告正文）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamEvents {
+    /// 流式增量（流式循环内逐 delta 发射，payload { text }）
+    pub chunk: &'static str,
+    /// 完成（调用方发射：报告需先剥离 SCORE 标记，payload { text }）
+    pub done: &'static str,
+    /// 失败（调用方发射，payload { message }）
+    pub error: &'static str,
+}
+
+pub const REPORT_STREAM_EVENTS: StreamEvents = StreamEvents {
+    chunk: "report_chunk",
+    done: "report_done",
+    error: "report_error",
+};
+
+pub const FOLLOWUP_STREAM_EVENTS: StreamEvents = StreamEvents {
+    chunk: "followup_chunk",
+    done: "followup_done",
+    error: "followup_error",
+};
 
 // ---------------------------------------------------------------------------
 // 模拟面试（mockInterview）：逐题问答注入
@@ -966,9 +1044,6 @@ async fn stream_remote_report(
     // 快速模式收紧 max_tokens（四节 ≤400 字，出稿更快也更省）；
     // 完整版不设上限（行为与 0.2.2 之前一致）
     let max_tokens = if mode == "quick" { Some(QUICK_MAX_TOKENS) } else { None };
-    let (base_url, model) = settings
-        .resolve_endpoint()
-        .ok_or_else(|| "后端地址未配置（自定义后端需填写 baseURL）".to_string())?;
     let mut stats = build_stats(
         sentences,
         snapshot.duration_ms,
@@ -992,7 +1067,32 @@ async fn stream_remote_report(
         }
         payload
     };
-    let body = build_request_body(&model, system, &user_payload.to_string(), max_tokens);
+    stream_chat_completion(
+        app,
+        settings,
+        system,
+        &user_payload.to_string(),
+        max_tokens,
+        &REPORT_STREAM_EVENTS,
+    )
+    .await
+}
+
+/// OpenAI 兼容流式请求：POST {base_url}/chat/completions（SSE），逐 delta 发
+/// `events.chunk` 事件（payload { text }），返回拼合全文。
+/// done / error 事件由调用方决定时机发射（报告需先剥离 SCORE 标记再发 done）。
+async fn stream_chat_completion(
+    app: &AppHandle,
+    settings: &Settings,
+    system: &str,
+    user_content: &str,
+    max_tokens: Option<u32>,
+    events: &StreamEvents,
+) -> Result<String, String> {
+    let (base_url, model) = settings
+        .resolve_endpoint()
+        .ok_or_else(|| "后端地址未配置（自定义后端需填写 baseURL）".to_string())?;
+    let body = build_request_body(&model, system, user_content, max_tokens);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
@@ -1022,15 +1122,58 @@ async fn stream_remote_report(
             if let Some(delta) = extract_delta(&data) {
                 if !delta.is_empty() {
                     full.push_str(&delta);
-                    let _ = app.emit("report_chunk", json!({ "text": delta }));
+                    let _ = app.emit(events.chunk, json!({ "text": delta }));
                 }
             }
         }
     }
     if full.trim().is_empty() {
-        return Err("模型返回了空报告".into());
+        return Err("模型返回了空内容".into());
     }
     Ok(full)
+}
+
+/// 就刚才的报告追问（对话式补充解答，报告页「追问与解答」分区）。
+/// - 复用报告的远端调用与 SSE 流式，但走独立事件 followup_chunk /
+///   followup_done / followup_error（不与报告正文串流）；
+/// - 未配置 Key（且非 Ollama）：返回明确中文错误并发 followup_error，
+///   前端据此给「去设置开启 AI」配置引导；
+/// - 本地降级报告同样可追问（report_text 就是本地报告全文）；
+/// - 每轮独立请求、带完整报告上下文，历史追问不重复发送。
+/// 返回值为回答全文（防御性剥离可能混入的 SCORE 标记）。
+#[tauri::command]
+pub async fn followup_question(
+    app: AppHandle,
+    question: String,
+    report_text: String,
+    scenario: String,
+) -> Result<String, String> {
+    let settings = crate::settings::load(&app);
+    if let Err(msg) = validate_followup(&question, &scenario, settings.can_call_remote()) {
+        let _ = app.emit(FOLLOWUP_STREAM_EVENTS.error, followup_error_payload(&msg));
+        return Err(msg);
+    }
+    let payload = build_followup_payload(&question, &report_text, &scenario);
+    let result = stream_chat_completion(
+        &app,
+        &settings,
+        FOLLOWUP_PROMPT,
+        &payload.to_string(),
+        Some(FOLLOWUP_MAX_TOKENS),
+        &FOLLOWUP_STREAM_EVENTS,
+    )
+    .await;
+    match result {
+        Ok(text) => {
+            let display = strip_score_marker(&text);
+            let _ = app.emit(FOLLOWUP_STREAM_EVENTS.done, followup_done_payload(&display));
+            Ok(display)
+        }
+        Err(e) => {
+            let _ = app.emit(FOLLOWUP_STREAM_EVENTS.error, followup_error_payload(&e));
+            Err(e)
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1551,6 +1694,111 @@ mod tests {
         let body = build_request_body("deepseek-chat", "SYS", "{}", Some(QUICK_MAX_TOKENS));
         assert_eq!(body["max_tokens"], QUICK_MAX_TOKENS);
         assert_eq!(body["stream"], true);
+    }
+
+    // --- 报告追问（followup）-------------------------------------------------
+
+    #[test]
+    fn followup_prompt_embedded_with_contract() {
+        // 身份与对话语境
+        assert!(FOLLOWUP_PROMPT.contains("表达教练"));
+        assert!(FOLLOWUP_PROMPT.contains("追问"));
+        // 输入 JSON 三字段（与 build_followup_payload 对应）
+        assert!(FOLLOWUP_PROMPT.contains("question"));
+        assert!(FOLLOWUP_PROMPT.contains("report"));
+        assert!(FOLLOWUP_PROMPT.contains("scenario"));
+        // 回答纪律：证据 / 简短 / 诚实
+        assert!(FOLLOWUP_PROMPT.contains("报告原文"));
+        assert!(FOLLOWUP_PROMPT.contains("300 字"));
+        assert!(FOLLOWUP_PROMPT.contains("不知道"));
+        assert!(FOLLOWUP_PROMPT.contains("禁止编造"));
+    }
+
+    #[test]
+    fn validate_followup_checks_question_scenario_and_remote() {
+        // 空问题 / 纯空白（校验最优先，错误信息对当前输入最准确）
+        for blank in ["", "   \n ", "\t"] {
+            let err = validate_followup(blank, "free", true).unwrap_err();
+            assert!(err.contains("空"), "{err}");
+        }
+        // 未知场景（与报告场景白名单同口径）
+        let err = validate_followup("为什么？", "other", true).unwrap_err();
+        assert!(err.contains("未知场景"), "{err}");
+        assert!(err.contains("mockInterview"), "{err}");
+        // 未配置远端：明确中文错误（前端据此给配置引导）
+        let err = validate_followup("为什么？", "free", false).unwrap_err();
+        assert!(err.contains("未配置"), "{err}");
+        assert!(err.contains("设置"), "{err}");
+        // 合法：非空问题 + 合法场景 + 远端可用；全部场景均接受
+        for scenario in SCENARIOS {
+            assert!(validate_followup(" 我最需要改什么？ ", scenario, true).is_ok());
+        }
+    }
+
+    #[test]
+    fn build_followup_payload_trims_question_and_labels_scenario() {
+        let payload =
+            build_followup_payload("  我的 STAR 哪个环节最弱？ ", "# 报告\n正文", "interview");
+        assert_eq!(payload["question"], "我的 STAR 哪个环节最弱？");
+        assert_eq!(payload["report"], "# 报告\n正文");
+        assert_eq!(payload["scenario"], "面试回答");
+        // 场景中文名（prompt 的 scenario 字段语义）
+        assert_eq!(build_followup_payload("q", "r", "free")["scenario"], "自由练习");
+        assert_eq!(build_followup_payload("q", "r", "mockInterview")["scenario"], "模拟面试");
+    }
+
+    #[test]
+    fn followup_stream_events_are_independent_from_report_events() {
+        // 独立事件名（复用 report_chunk 会把追问串进报告正文）
+        assert_eq!(FOLLOWUP_STREAM_EVENTS.chunk, "followup_chunk");
+        assert_eq!(FOLLOWUP_STREAM_EVENTS.done, "followup_done");
+        assert_eq!(FOLLOWUP_STREAM_EVENTS.error, "followup_error");
+        // 与报告三件套完全不相交
+        let report_names = [
+            REPORT_STREAM_EVENTS.chunk,
+            REPORT_STREAM_EVENTS.done,
+            REPORT_STREAM_EVENTS.error,
+        ];
+        for name in [
+            FOLLOWUP_STREAM_EVENTS.chunk,
+            FOLLOWUP_STREAM_EVENTS.done,
+            FOLLOWUP_STREAM_EVENTS.error,
+        ] {
+            assert!(!report_names.contains(&name), "{name} 不得与报告事件重名");
+        }
+        // 报告事件名保持既有契约（前端 useReport 监听不变）
+        assert_eq!(REPORT_STREAM_EVENTS.chunk, "report_chunk");
+        assert_eq!(REPORT_STREAM_EVENTS.done, "report_done");
+        assert_eq!(REPORT_STREAM_EVENTS.error, "report_error");
+    }
+
+    #[test]
+    fn followup_event_payloads_match_report_shape() {
+        // done 带 text / error 带 message，与 report_* 事件同形（前端同一消费方式）
+        assert_eq!(followup_done_payload("回答全文"), json!({ "text": "回答全文" }));
+        assert_eq!(
+            followup_error_payload("未配置 API Key"),
+            json!({ "message": "未配置 API Key" })
+        );
+    }
+
+    #[test]
+    fn followup_request_body_streams_with_token_cap() {
+        // 追问请求体：流式 + max_tokens 上限（≤300 字回答防超长拖慢），
+        // user 内容为 followup JSON 字符串
+        let body = build_request_body(
+            "deepseek-chat",
+            "SYS",
+            r#"{ "question": "为什么", "report": "R", "scenario": "自由练习" }"#,
+            Some(FOLLOWUP_MAX_TOKENS),
+        );
+        assert_eq!(body["model"], "deepseek-chat");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_tokens"], FOLLOWUP_MAX_TOKENS);
+        let user = body["messages"][1]["content"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(user).unwrap();
+        assert_eq!(parsed["question"], "为什么");
+        assert_eq!(parsed["scenario"], "自由练习");
     }
 
     #[test]
